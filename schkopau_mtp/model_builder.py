@@ -61,13 +61,12 @@ def build_model(df: pd.DataFrame, cost_meta: dict) -> ConcreteModel:
     #  Common parameters (indexed by T only)
     # --------------------------------------------------------
     m.price = Param(m.T, initialize=idx["Price"].to_dict())
-    m.price_nonneg = Param(m.T, initialize={t: (1 if p >= 0 else 0) for t, p in idx["Price"].to_dict().items()})
     m.EUA = Param(m.T, initialize=idx["EUA"].to_dict())
 
     m.gridfee = Param(m.T, initialize=idx["GRIDFEE"].to_dict())
 
-    m.DOW = Param(m.T, initialize=idx["DOW"].to_dict())
-    m.DOW_rev = Param(m.T, initialize=idx["DOW revenues"].to_dict())
+    m.DOW = Param(m.T, initialize=idx["DOW"].to_dict(), mutable=True)
+    m.DOW_rev = Param(m.T, initialize=idx["DOW revenues"].to_dict(), mutable=True)
 
     # --------------------------------------------------------
     #  Per-block parameters (indexed by B × T)
@@ -146,7 +145,7 @@ def build_model(df: pd.DataFrame, cost_meta: dict) -> ConcreteModel:
         if init_unavail >= 0.5:
             m.on[b, 0].fix(0)
         else:
-            m.on[b, 0].fix(cfg.INITIAL_ON)
+            m.on[b, 0].fix(cfg.INITIAL_ON[b])
 
     # --------------------------------------------------------
     #  Constraints
@@ -238,7 +237,7 @@ def warm_start_heuristic(m) -> None:
         if init_unavail >= 0.5:
             on_b[0] = 0
         else:
-            on_b[0] = cfg.INITIAL_ON
+            on_b[0] = cfg.INITIAL_ON[b]
 
         # Enforce MIN_DOWN after each forced-off period
         for _pass in range(3):
@@ -368,7 +367,7 @@ def warm_start_heuristic(m) -> None:
                 m.on[b, t].value = on_val
 
             # startup / shutdown
-            prev_on = on_b[t - 1] if t > 0 else cfg.INITIAL_ON
+            prev_on = on_b[t - 1] if t > 0 else cfg.INITIAL_ON[b]
             su = 1 if on_val == 1 and prev_on == 0 else 0
             sd = 1 if on_val == 0 and prev_on == 1 else 0
             if not m.startup[b, t].fixed:
@@ -584,7 +583,7 @@ def _add_startup_shutdown_constraints(m, T_len: int) -> None:
     # Replaces separate >= inequalities; shutdown_link1/2/3 are implied.
     def su_sd_balance(m, b, t):
         if t == 0:
-            return m.startup[b, t] - m.shutdown[b, t] == m.on[b, t] - cfg.INITIAL_ON
+            return m.startup[b, t] - m.shutdown[b, t] == m.on[b, t] - cfg.INITIAL_ON[b]
         return m.startup[b, t] - m.shutdown[b, t] == m.on[b, t] - m.on[b, t - 1]
 
     m.su_sd_balance = Constraint(m.B, m.T, rule=su_sd_balance)
@@ -596,7 +595,7 @@ def _add_startup_shutdown_constraints(m, T_len: int) -> None:
 
     def startup_link3(m, b, t):
         if t == 0:
-            return m.startup[b, t] <= 1 - cfg.INITIAL_ON
+            return m.startup[b, t] <= 1 - cfg.INITIAL_ON[b]
         return m.startup[b, t] <= 1 - m.on[b, t - 1]
 
     m.startup_link3 = Constraint(m.B, m.T, rule=startup_link3)
@@ -837,20 +836,24 @@ def _add_objective(m, hot_cost, warm_cost, vcold_cost) -> None:
                 )
 
             # OFF_costs: grid fee only when BOTH blocks offline
-            OFF_costs = m.plant_off[t] * cfg.OWN_CONSUMPTION * (
+            off_consumption = cfg.OWN_CONSUMPTION
+            if cfg.USE_DOW_OPPORTUNITY_COSTS:
+                off_consumption += cfg.DOW_OFF_CONSUMPTION
+            OFF_costs = m.plant_off[t] * off_consumption * (
                 m.price[t] + m.gridfee[t]
             )
+            if cfg.USE_DOW_OPPORTUNITY_COSTS:
+                OFF_costs -= m.plant_off[t] * cfg.DOW_OFF_CONSUMPTION * cfg.DOW_OFF_COMPENSATION
             expr -= OFF_costs
 
-            # DOW revenue / subsidy attributed once per hour (plant-level)
+            # DOW revenue attributed once per hour (plant-level)
             # DOW is active when at least one block is running
             _other = [b for b in cfg.BLOCKS if b != cfg.DOW_BLOCK][0]
             dow_on = (
                 m.on[cfg.DOW_BLOCK, t] + m.on[_other, t] - m.both_on[t]
             )
-            dow_subsidy = cfg.DOW_SUBSIDY * m.DOW[t] * m.price_nonneg[t] * dow_on
             dow_revenue = m.DOW_rev[t] * dow_on
-            expr += dow_revenue + dow_subsidy
+            expr += dow_revenue
 
         return expr
 

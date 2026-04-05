@@ -79,8 +79,9 @@ def main() -> None:
 
     # Coal shadow prices (LP re-solve with fixed binaries)
     coal_shadow_prices = {}
+    merchant_shadow_prices = {}
     if not skip_solve and m is not None and cfg.USE_COAL_CONSTRAINS:
-        coal_shadow_prices = extract_coal_shadow_prices(m)
+        coal_shadow_prices, merchant_shadow_prices = extract_coal_shadow_prices(m)
 
     # Objective value
     if skip_solve:
@@ -119,7 +120,8 @@ def main() -> None:
     #  Step 7 – Write Excel report
     # ----------------------------------------------------------------
     write_excel(df, cost_meta, cfg.OUTPUT_FILE,
-                coal_shadow_prices=coal_shadow_prices)
+                coal_shadow_prices=coal_shadow_prices,
+                merchant_shadow_prices=merchant_shadow_prices)
 
 
 if __name__ == "__main__":

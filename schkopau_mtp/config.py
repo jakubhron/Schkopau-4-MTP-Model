@@ -51,7 +51,7 @@ _input_stem = os.path.splitext(os.path.basename(INPUT_FILE))[0]
 # ============================================================
 #                   COAL CONSTRAINTS
 # ============================================================
-USE_COAL_CONSTRAINS = False  # enforce monthly coal volume limits from input tab
+USE_COAL_CONSTRAINS = True  # enforce monthly coal volume limits from input tab
 
 _restricted_tag = "restricted_" if USE_COAL_CONSTRAINS else ""
 OUTPUT_FILE = os.path.join(os.path.dirname(INPUT_FILE), f"{_input_stem}_results_{_restricted_tag}{_now}.xlsx")
@@ -74,7 +74,7 @@ SKIP_SOLVE_AND_EXTRACT = False
 #                   SOLVER SETTINGS
 # ============================================================
 USE_MOSEK = True
-MOSEK_MIO_TOL_REL_GAP = "0.05"    # 5 % MIP gap
+MOSEK_MIO_TOL_REL_GAP = "0.01"    # 1 % MIP gap
 MOSEK_MIO_MAX_TIME = "600"         # max 10 minutes
 
 # ============================================================
@@ -88,16 +88,24 @@ BIG_M = 500              # tight Big-M (≥ Pmax + boost ≈ 445 MW)
 MIN_UP = 8              # min-up time [h]
 MIN_DOWN = 6            # min-down time [h]
 START_MARGIN_MIN = 0         # minimum margin hurdle / start [EUR]
-INITIAL_ON = 1           # initial unit commitment state
+INITIAL_ON = {"A": 0, "B": 1}  # initial unit commitment state per block
 MAX_RAMP_HOURS = 4       # maximum startup ramp duration [h]
 USE_SIMPLE_STARTUP_RAMP = True # if True: startup dispatch uses only Pmin/Pmax bounds (no tier ramp profiles)
 
 # ============================================================
 #                   ECONOMIC PARAMETERS
 # ============================================================
-DOW_SUBSIDY = 0      # DOW CHP subsidy [EUR/MWhth]
 OWN_CONSUMPTION = 10.0   # house power [MW]
 DEFAULT_GRIDFEE = 0   # fallback grid fee [EUR/MWh]
+
+# ============================================================
+#                   DOW OPPORTUNITY COSTS
+# ============================================================
+USE_DOW_OPPORTUNITY_COSTS = True   # True: include DOW running costs + DOW revenue in PnL
+                                   # False: exclude both DOW running costs and DOW revenue
+DOW_OPPORTUNITY_REVENUE = 188.0    # [EUR/MW DOW] — extra revenue per MW DOW (only when USE_DOW_OPPORTUNITY_COSTS=True)
+DOW_OFF_CONSUMPTION = 130.0        # [MW] — extra grid consumption from DOW when both blocks offline
+DOW_OFF_COMPENSATION = 6.9         # [EUR/MWh] — DOW compensation reducing grid cost on DOW portion
 
 # ============================================================
 #                   MONTHLY LAYOUT (for Excel reporting)

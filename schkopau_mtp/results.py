@@ -120,7 +120,7 @@ def _extract_decision_variables(df: pd.DataFrame, m) -> pd.DataFrame:
 # ====================================================================
 
 
-def _compute_tiered_start_cost(on_series, startup_series, tiers):
+def _compute_tiered_start_cost(on_series, startup_series, tiers, initial_on=1):
     """Compute startup cost per hour matching the Pyomo 3-tier model.
 
     Tiers: hot (<10h), warm (10-60h), vcold (≥60h).
@@ -141,7 +141,9 @@ def _compute_tiered_start_cost(on_series, startup_series, tiers):
     hot_thresh = 10
     vcold_thresh = 60
 
-    off_count = 0
+    # If the block was ON before the horizon, off_count starts at 0 (just turned on).
+    # If it was OFF, we don't know how long — assume very cold (large off_count).
+    off_count = 0 if initial_on else vcold_thresh
     for i in range(n):
         if int(round(on_arr[i])) == 0:
             off_count += 1
@@ -193,7 +195,8 @@ def _compute_pnl(df: pd.DataFrame, cost_meta: dict) -> pd.DataFrame:
         total_run_costs += rc
 
         # Tiered startup cost: compute offline duration at each startup
-        sc = _compute_tiered_start_cost(on_b, df[f"startup_{b}"], starts.get(b, []))
+        sc = _compute_tiered_start_cost(on_b, df[f"startup_{b}"], starts.get(b, []),
+                                         initial_on=cfg.INITIAL_ON.get(b, 1))
         df[f"start_cost_{b}"] = sc
         total_start_cost += sc
 
@@ -209,17 +212,21 @@ def _compute_pnl(df: pd.DataFrame, cost_meta: dict) -> pd.DataFrame:
     # OFF_costs: grid fee only when BOTH blocks offline
     _any_on = sum(df[f"on_model_{b}"] for b in cfg.BLOCKS)
     plant_off = (_any_on == 0).astype(int)
-    df["OFF_costs"] = plant_off * cfg.OWN_CONSUMPTION * (df["Price"] + df["GRIDFEE"])
+    off_consumption = cfg.OWN_CONSUMPTION
+    if cfg.USE_DOW_OPPORTUNITY_COSTS:
+        off_consumption += cfg.DOW_OFF_CONSUMPTION
+    df["OFF_costs"] = plant_off * off_consumption * (df["Price"] + df["GRIDFEE"])
+    if cfg.USE_DOW_OPPORTUNITY_COSTS:
+        df["OFF_costs"] -= plant_off * cfg.DOW_OFF_CONSUMPTION * cfg.DOW_OFF_COMPENSATION
 
     df["P_eff"] = sum(df[f"P_eff_{b}"] for b in cfg.BLOCKS)
 
-    # DOW revenue / subsidy — active when at least one block is running
+    # DOW revenue — active when at least one block is running
     _other = [b for b in cfg.BLOCKS if b != cfg.DOW_BLOCK][0]
     _on_A = df[f"on_model_{cfg.DOW_BLOCK}"]
     _on_B = df[f"on_model_{_other}"]
     dow_on = (_on_A + _on_B - _on_A * _on_B).clip(upper=1)  # at least one on
     df["DOW_revenues_real"] = df["DOW revenues"] * dow_on
-    df["dow_subsidy"] = cfg.DOW_SUBSIDY * df["DOW"] * dow_on * (df["Price"] >= 0).astype(int)
 
     # DOW volumes
     _w = pd.to_numeric(df.get("DOW", 0.0), errors="coerce").fillna(0.0)
@@ -228,7 +235,6 @@ def _compute_pnl(df: pd.DataFrame, cost_meta: dict) -> pd.DataFrame:
     df["PnL"] = (
         df["profit_spot"]
         + df["DOW_revenues_real"]
-        + df["dow_subsidy"]
         - df["run_costs"]
         - df["start_cost"]
         - df["OFF_costs"]
@@ -255,7 +261,6 @@ def _print_pnl_reconciliation(df, obj_val, pnl_val):
     parts: dict = {
         "profit_spot": _sumcol("profit_spot"),
         "DOW_revenues_real": _sumcol("DOW_revenues_real"),
-        "dow_subsidy": _sumcol("dow_subsidy"),
     }
     cost_cols = [
         "run_costs", "OFF_costs", "start_cost",
@@ -315,7 +320,6 @@ def _print_pnl_reconciliation(df, obj_val, pnl_val):
     _dow_on = (_on_Ar + _on_Br - _on_Ar * _on_Br).clip(upper=1)
     obj_profit_spot = df["P"] * df["Price"]
     obj_dow_revenue = df["DOW revenues"] * _dow_on
-    obj_dow_subsidy = cfg.DOW_SUBSIDY * df["DOW"] * _dow_on * (df["Price"] >= 0).astype(int)
     obj_run_costs = df["run_costs"]
     obj_OFF_costs = df["OFF_costs"]
     obj_start_cost = df["start_cost"]
@@ -323,7 +327,6 @@ def _print_pnl_reconciliation(df, obj_val, pnl_val):
     checks = [
         ("profit_spot", obj_profit_spot, df["profit_spot"]),
         ("DOW_revenues_real", obj_dow_revenue, df["DOW_revenues_real"]),
-        ("dow_subsidy", obj_dow_subsidy, df["dow_subsidy"]),
         ("run_costs", obj_run_costs, df["run_costs"]),
         ("OFF_costs", obj_OFF_costs, df["OFF_costs"]),
         ("start_cost", obj_start_cost, df["start_cost"]),
@@ -361,7 +364,6 @@ def _print_pyomo_component_audit(df, m, obj_val_global, cost_meta=None):
 
     py_profit_spot = 0.0
     py_dow_rev = 0.0
-    py_dow_sub = 0.0
     py_run_costs = 0.0
     py_off_costs = 0.0
     py_start = 0.0
@@ -381,22 +383,25 @@ def _print_pyomo_component_audit(df, m, obj_val_global, cost_meta=None):
             py_start += start_cost
 
         # OFF_costs: grid fee only when both blocks offline
-        py_off_costs += _v(m.plant_off[t]) * cfg.OWN_CONSUMPTION * (
+        off_consumption = cfg.OWN_CONSUMPTION
+        if cfg.USE_DOW_OPPORTUNITY_COSTS:
+            off_consumption += cfg.DOW_OFF_CONSUMPTION
+        py_off_costs += _v(m.plant_off[t]) * off_consumption * (
             _v(m.price[t]) + _v(m.gridfee[t])
         )
+        if cfg.USE_DOW_OPPORTUNITY_COSTS:
+            py_off_costs -= _v(m.plant_off[t]) * cfg.DOW_OFF_CONSUMPTION * cfg.DOW_OFF_COMPENSATION
 
         # DOW (plant-level, dispatch-based)
         _other_py = [b for b in cfg.BLOCKS if b != cfg.DOW_BLOCK][0]
         _on_A_py = _v(m.on[cfg.DOW_BLOCK, t])
         _on_B_py = _v(m.on[_other_py, t])
         plant_on = min(_on_A_py + _on_B_py, 1.0)  # at least one on
-        dow_subsidy = cfg.DOW_SUBSIDY * _v(m.DOW[t]) * plant_on * (1 if _v(m.price[t]) >= 0 else 0)
         dow_revenue = _v(m.DOW_rev[t]) * plant_on
         py_dow_rev += dow_revenue
-        py_dow_sub += dow_subsidy
 
     py_recon = (
-        py_profit_spot + py_dow_rev + py_dow_sub
+        py_profit_spot + py_dow_rev
         - py_run_costs - py_off_costs - py_start
     )
     df_recon = float(df["PnL"].sum()) if "PnL" in df.columns else float("nan")
@@ -405,7 +410,6 @@ def _print_pyomo_component_audit(df, m, obj_val_global, cost_meta=None):
     print("\n=== PYOMO component sums (solve mode) ===")
     print(f"py_profit_spot           : {py_profit_spot:,.2f}")
     print(f"py_dow_revenue           : {py_dow_rev:,.2f}")
-    print(f"py_dow_subsidy           : {py_dow_sub:,.2f}")
     print(f"py_run_costs             : {py_run_costs:,.2f}")
     print(f"py_OFF_costs             : {py_off_costs:,.2f}")
     print(f"py_start_cost            : {py_start:,.2f}")
@@ -422,7 +426,6 @@ def _print_pyomo_component_audit(df, m, obj_val_global, cost_meta=None):
     compare = [
         ("profit_spot", py_profit_spot, _ds("profit_spot")),
         ("DOW_revenues_real", py_dow_rev, _ds("DOW_revenues_real")),
-        ("dow_subsidy", py_dow_sub, _ds("dow_subsidy")),
         ("run_costs", py_run_costs, _ds("run_costs")),
         ("OFF_costs", py_off_costs, _ds("OFF_costs")),
         ("start_cost", py_start, _ds("start_cost")),

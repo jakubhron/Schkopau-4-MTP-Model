@@ -31,6 +31,7 @@ def write_excel(
     output_path: str,
     *,
     coal_shadow_prices: dict | None = None,
+    merchant_shadow_prices: dict | None = None,
 ) -> None:
     """
     Create the output Excel workbook with a *Results* and *Monthly* sheet.
@@ -42,6 +43,8 @@ def write_excel(
     output_path : str   – destination xlsx path.
     coal_shadow_prices : dict, optional
         {(year, month): EUR/t} shadow prices from the coal constraint LP re-solve.
+    merchant_shadow_prices : dict, optional
+        {(year, month): EUR/t} merchant-only shadow prices (DOW revenue excluded).
     """
     Pmax_eff = max(cost_meta.get(f"Pmax_eff_{b}", 0.0) for b in cfg.BLOCKS)
 
@@ -61,7 +64,7 @@ def write_excel(
             "Coal_t_h", "CO2_t_h",
             "CO2_cost_EUR_h",
             "Merchant_power_revenue_EUR_h",
-            "DOW_AP_revenue_EUR_h", "DOW_CHP_subsidy_EUR_h",
+            "DOW_AP_revenue_EUR_h",
             "Coal_API2_cost_EUR_h", "Coal_other_cost_EUR_h",
             "Start_cost_EUR_h", "Variable_other_cost_EUR_h",
             "TC_stack_delta_EUR_h",
@@ -84,12 +87,22 @@ def write_excel(
         present = [c for c in monthly_cols if c in df_m.columns]
         df_out = pd.concat([df_out, df_m[present]], axis=1)
 
+        # Drop internal computation columns not needed in output
+        _internal_cols = [
+            f"{prefix}_{b}"
+            for prefix in ("cost_slope", "cost_fixed", "TC_PminN", "TC_Pmax",
+                           "coal_slope", "coal_fixed")
+            for b in cfg.BLOCKS
+        ]
+        df_out = df_out.drop(columns=[c for c in _internal_cols if c in df_out.columns])
+
         # Overwrite Results
         df_out.to_excel(writer, index=False, sheet_name="Results")
 
         # --- Sheet 2: Monthly summary (plant total) ---
         _write_monthly_sheet(writer, df_m, output_path, sheet_name="Monthly",
-                             coal_shadow_prices=coal_shadow_prices)
+                             coal_shadow_prices=coal_shadow_prices,
+                             merchant_shadow_prices=merchant_shadow_prices)
 
         # --- Per-block Monthly sheets ---
         for blk in cfg.BLOCKS:
@@ -100,6 +113,7 @@ def write_excel(
                 writer, df_blk, output_path,
                 sheet_name=f"Monthly_{blk}", block=blk,
                 coal_shadow_prices=coal_shadow_prices,
+                merchant_shadow_prices=merchant_shadow_prices,
             )
 
     print(f"\n✓ {cfg.VERSION} saved as:")
@@ -173,12 +187,10 @@ def _prepare_monthly_columns(
         _plant_dow_on = (_on_primary + _s(df_m, f"on_model_{[b for b in cfg.BLOCKS if b != cfg.DOW_BLOCK][0]}", 0.0).round().astype(int)).clip(upper=1)
         _frac_safe = _dow_frac / _plant_dow_on.replace(0, 1)  # avoid /0 when both off
         df_m["DOW_revenues_real"] = _s(df_m, "DOW_revenues_real", 0.0) * _frac_safe
-        df_m["dow_subsidy"] = _s(df_m, "dow_subsidy", 0.0) * _frac_safe
         df_m["DOW revenues"] = _s(df_m, "DOW revenues", 0.0) * _frac_safe
         df_m["PnL"] = (
             _s(df_m, f"profit_spot_{block}", 0.0)
             + _s(df_m, "DOW_revenues_real", 0.0)
-            + _s(df_m, "dow_subsidy", 0.0)
             - _s(df_m, f"run_costs_{block}", 0.0)
             - _s(df_m, f"start_cost_{block}", 0.0)
             - df_m["OFF_costs"]
@@ -350,7 +362,7 @@ def _prepare_monthly_columns(
     # Hourly revenues / costs
     df_m["Merchant_power_revenue_EUR_h"] = df_m["P"] * df_m["Price"]
     df_m["DOW_AP_revenue_EUR_h"] = df_m.get("DOW_revenues_real", 0.0)
-    df_m["DOW_CHP_subsidy_EUR_h"] = df_m.get("dow_subsidy", 0.0)
+
 
     df_m["Coal_API2_cost_EUR_h"] = _coal_api2_acc
     df_m["Coal_other_cost_EUR_h"] = _coal_other_acc
@@ -474,6 +486,7 @@ def _write_monthly_sheet(
     sheet_name: str = "Monthly",
     block: str | None = None,
     coal_shadow_prices: dict | None = None,
+    merchant_shadow_prices: dict | None = None,
 ) -> None:
     """Build the Monthly aggregation table and style it."""
     bsf = f"_{block}" if block else "_A"
@@ -500,26 +513,18 @@ def _write_monthly_sheet(
     # ---- Revenues ----
     mv["EPEX Revenues"] = msum("Merchant_power_revenue_EUR_h")
     mv["DOW AP revenue"] = msum("DOW_AP_revenue_EUR_h")
-    mv["DOW CHP subsidy"] = msum("DOW_CHP_subsidy_EUR_h")
 
-    mv["DOW revenues (TOTAL)"] = mv["DOW AP revenue"].add(
-        mv["DOW CHP subsidy"], fill_value=0.0
-    )
+    mv["DOW revenues (TOTAL)"] = mv["DOW AP revenue"]
     mv["Total Revenues (TOTAL)"] = (
         mv["EPEX Revenues"]
         .add(mv["DOW revenues (TOTAL)"], fill_value=0.0)
     )
 
     # ---- Costs ----
-    mv["Coal API2"] = (
+    mv["Coal"] = (
         msum("Coal_API2_cost_solver_EUR_h")
         if "Coal_API2_cost_solver_EUR_h" in df_m.columns
         else msum("Coal_API2_cost_EUR_h")
-    )
-    mv["Coal other costs (premium, transportation)"] = (
-        msum("Coal_other_cost_solver_EUR_h")
-        if "Coal_other_cost_solver_EUR_h" in df_m.columns
-        else msum("Coal_other_cost_EUR_h")
     )
     mv["CO2 costs"] = (
         msum("CO2_cost_solver_EUR_h")
@@ -529,8 +534,7 @@ def _write_monthly_sheet(
 
     # Cost breakdowns: Merchant + DOW only
     for prefix, base_col in [
-        ("Coal API2", "Coal_API2_EUR_h"),
-        ("Coal other", "Coal_other_EUR_h"),
+        ("Coal", "Coal_API2_EUR_h"),
         ("CO2 costs", "CO2_EUR_h"),
     ]:
         for suffix in ["Merchant", "DOW"]:
@@ -553,8 +557,7 @@ def _write_monthly_sheet(
         .add(mv["House Power"], fill_value=0.0)
     )
     mv["Total Costs (TOTAL)"] = (
-        mv["Coal API2"]
-        .add(mv["Coal other costs (premium, transportation)"], fill_value=0.0)
+        mv["Coal"]
         .add(mv["CO2 costs"], fill_value=0.0)
         .add(mv["TC stack delta costs"], fill_value=0.0)
         .add(mv["Other costs (TOTAL)"], fill_value=0.0)
@@ -605,10 +608,15 @@ def _write_monthly_sheet(
             {(y, mo): v for (y, mo), v in coal_shadow_prices.items()},
             dtype=float,
         )
+    if merchant_shadow_prices:
+        mv["Coal shadow price (Merchant)"] = pd.Series(
+            {(y, mo): v for (y, mo), v in merchant_shadow_prices.items()},
+            dtype=float,
+        )
 
     # ---- Price averages ----
     mv["EPEX forecast BL"] = mmean("Price")
-    mv["CDS"] = mmean("Price").sub(mmean(f"TC_Pmax{bsf}"), fill_value=0.0)
+    mv["CLS"] = mmean("Price").sub(mmean(f"TC_Pmax{bsf}"), fill_value=0.0)
 
     # ----------------------------------------------------------------
     #  Build the output table
@@ -655,20 +663,16 @@ def _define_output_rows() -> List[Tuple[str, str | None, str | None]]:
         # --- PRICE INDICATORS ---
         ("Price Indicators", None, None),
         ("EPEX forecast BL", "EUR/MWh", "EPEX forecast BL"),
-        ("CDS", "EUR/MWh", "CDS"),
+        ("CLS", "EUR/MWh", "CLS"),
         ("", None, None),
         # --- REVENUES ---
         ("EPEX Revenues", "EUR", "EPEX Revenues"),
         ("DOW revenues (TOTAL)", "EUR", "DOW revenues (TOTAL)"),
         ("Total Revenues (TOTAL)", "EUR", "Total Revenues (TOTAL)"),
-        ("", None, None),
         # --- COSTS ---
-        ("    Coal API2 (TOTAL)", "EUR", "Coal API2"),
-        ("        Merchant", "EUR", "Coal API2 -- Merchant"),
-        ("        DOW", "EUR", "Coal API2 -- DOW"),
-        ("    Coal other (TOTAL)", "EUR", "Coal other costs (premium, transportation)"),
-        ("        Merchant", "EUR", "Coal other -- Merchant"),
-        ("        DOW", "EUR", "Coal other -- DOW"),
+        ("    Coal (TOTAL)", "EUR", "Coal"),
+        ("        Merchant", "EUR", "Coal -- Merchant"),
+        ("        DOW", "EUR", "Coal -- DOW"),
         ("    CO2 costs (TOTAL)", "EUR", "CO2 costs"),
         ("        Merchant", "EUR", "CO2 costs -- Merchant"),
         ("        DOW", "EUR", "CO2 costs -- DOW"),
@@ -684,17 +688,18 @@ def _define_output_rows() -> List[Tuple[str, str | None, str | None]]:
         ("Power produced Merchant (TOTAL)", "GWh", "Power produced Merchant"),
         ("Power produced DOW", "GWh", "Power produced DOW"),
         ("Coal Consumption TOTAL", "kMT", "Coal Consumption"),
-        ("    Coal Consumption -- Merchant", "kMT", "Coal Consumption -- Merchant"),
-        ("    Coal Consumption -- DOW", "kMT", "Coal Consumption -- DOW"),
+        ("    Coal Consumption - Merchant", "kMT", "Coal Consumption -- Merchant"),
+        ("    Coal Consumption - DOW", "kMT", "Coal Consumption -- DOW"),
         ("CO2 emissions TOTAL", "kMT", "CO2 emissions"),
-        ("    CO2 emissions -- Merchant", "kMT", "CO2 emissions -- Merchant"),
-        ("    CO2 emissions -- DOW", "kMT", "CO2 emissions -- DOW"),
+        ("    CO2 emissions - Merchant", "kMT", "CO2 emissions -- Merchant"),
+        ("    CO2 emissions - DOW", "kMT", "CO2 emissions -- DOW"),
         ("Number of starts", "#", "Number of starts"),
         ("Outage", "h", "Outage"),
-        ("DOW volume", "GWhth", "DOW volume"),
+        ("DOW volume", "GWh", "DOW volume"),
         ("", None, None),
         # --- COAL CONSTRAINT SHADOW PRICES ---
         ("Coal Shadow Price", "EUR/t", "Coal shadow price"),
+        ("Coal Shadow Price (Merchant)", "EUR/t", "Coal shadow price (Merchant)"),
     ]
 
 
@@ -868,7 +873,7 @@ def _style_monthly_sheet(ws, periods, num_output_rows: int) -> None:
                 break
 
     # EUR/MWh rows – two decimal places
-    eur_mwh_rows = ["EPEX forecast BL", "CDS"]
+    eur_mwh_rows = ["EPEX forecast BL", "CLS"]
     for label in eur_mwh_rows:
         for r in range(4, ws.max_row + 1):
             if ws.cell(row=r, column=1).value == label:
@@ -878,8 +883,3 @@ def _style_monthly_sheet(ws, periods, num_output_rows: int) -> None:
                         cell.number_format = "#,##0.00"
                 break
 
-    # Row 41 white font
-    row_41 = 41
-    if row_41 <= ws.max_row:
-        for c in range(1, last_col + 1):
-            ws.cell(row=row_41, column=c).font = Font(color="FFFFFF", bold=False)

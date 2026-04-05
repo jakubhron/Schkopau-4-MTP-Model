@@ -203,4 +203,65 @@ def extract_coal_shadow_prices(m) -> dict:
         print(f"    Coal price add-on {ym[0]}-{ym[1]:02d}: {sp:+.2f} EUR/t"
               f"  {'(binding)' if abs(sp) > 0.01 else '(not binding)'}")
 
-    return shadow_prices
+    # --- Merchant-only shadow prices (exclude DOW revenue AND DOW coal) ---
+    merchant_shadow: dict = {}
+    if cfg.USE_DOW_OPPORTUNITY_COSTS:
+        # Save continuous variable values before merchant re-solve
+        saved_cont_vals: dict = {}
+        for v in m.component_objects(Var, active=True):
+            for idx in v:
+                vd = v[idx]
+                if not (vd.is_integer() or vd.is_binary()):
+                    saved_cont_vals[(id(v), idx)] = vd.value
+
+        # Temporarily zero out DOW and DOW revenue → P_eff = P, no DOW revenue
+        saved_dow_rev = {t: value(m.DOW_rev[t]) for t in m.T}
+        saved_dow = {t: value(m.DOW[t]) for t in m.T}
+        for t in m.T:
+            m.DOW_rev[t] = 0.0
+            m.DOW[t] = 0.0
+
+        # Re-fix integers
+        fixed_vars2: list = []
+        for v in m.component_objects(Var, active=True):
+            for idx in v:
+                vd = v[idx]
+                if vd.is_integer() or vd.is_binary():
+                    orig_domain = vd.domain
+                    if not vd.fixed:
+                        vd.fix(round(value(vd)))
+                        fixed_vars2.append((v, idx, orig_domain, True))
+                    else:
+                        fixed_vars2.append((v, idx, orig_domain, False))
+                    vd.domain = NonNegativeReals
+
+        m.dual = Suffix(direction=Suffix.IMPORT)
+        lp_solver.solve(m, tee=False)
+
+        for ym in m.coal_months:
+            merchant_shadow[ym] = m.dual.get(m.coal_monthly_limit[ym], 0.0)
+
+        # Restore integers
+        for v, idx, orig_domain, was_unfixed in fixed_vars2:
+            v[idx].domain = orig_domain
+            if was_unfixed:
+                v[idx].unfix()
+        m.del_component(m.dual)
+
+        # Restore DOW parameters
+        for t in m.T:
+            m.DOW_rev[t] = saved_dow_rev[t]
+            m.DOW[t] = saved_dow[t]
+
+        # Restore continuous variable values overwritten by merchant LP
+        for v in m.component_objects(Var, active=True):
+            for idx in v:
+                key = (id(v), idx)
+                if key in saved_cont_vals:
+                    v[idx].value = saved_cont_vals[key]
+
+        for ym, sp in sorted(merchant_shadow.items()):
+            print(f"    Merchant shadow  {ym[0]}-{ym[1]:02d}: {sp:+.2f} EUR/t"
+                  f"  {'(binding)' if abs(sp) > 0.01 else '(not binding)'}")
+
+    return shadow_prices, merchant_shadow

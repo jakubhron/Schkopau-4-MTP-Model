@@ -172,7 +172,10 @@ def _add_season_and_dow(df: pd.DataFrame) -> pd.DataFrame:
     # Rename input column Warme → DOW if present
     if "Warme" in df.columns:
         df = df.rename(columns={"Warme": "DOW"})
-    df["DOW revenues"] = 0.0
+    if cfg.USE_DOW_OPPORTUNITY_COSTS:
+        df["DOW revenues"] = cfg.DOW_OPPORTUNITY_REVENUE * df["DOW"]
+    else:
+        df["DOW revenues"] = 0.0
 
     return df
 
