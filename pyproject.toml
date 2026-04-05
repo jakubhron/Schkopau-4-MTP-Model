@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "schkopau-mtp"
+version = "0.2.0"
+description = "Schkopau power plant medium-term dispatch optimisation model"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Proprietary"}
+
+authors = [
+    {name = "JH", email = "jakub.hron@epcommodities.cz"},
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "pyomo>=6.6",
+    "openpyxl>=3.1",
+    "mosek>=10.0",
+    "highspy>=1.13",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+schkopau-mtp = "schkopau_mtp.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["schkopau_mtp*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

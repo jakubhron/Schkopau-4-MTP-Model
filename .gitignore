@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Solver cache
+_solver_cache/
+
+# Excel files (input/output data)
+*.xlsx
+
+# Zip archives
+*.zip
+
+# Environment
+.env
+.venv/
