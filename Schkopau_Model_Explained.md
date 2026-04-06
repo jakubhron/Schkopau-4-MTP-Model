@@ -184,7 +184,7 @@ Constraints are the "guardrails" that prevent the optimiser from doing impossibl
 
 $$\text{on}_{b,t} \le 1 - \text{unavailibility}_{b,t}$$
 
-If a block is in a planned outage (unavailibility = 1), it **cannot** be on.  Simple.
+If a block is in a planned outage (unavailibility = 1), it **cannot** be on — a straightforward binary exclusion.
 
 ### 4.2  Start-up / shut-down logic
 
@@ -256,9 +256,9 @@ When enabled (via `USE_SIMPLE_STARTUP_RAMP = False`), the model limits the power
 
 ### 5.1  Why coal limits matter
 
-Imagine you have a car that can drive 200 km/h, but you only have 50 litres of fuel for the month.  You would not floor the accelerator at every green light – you would *plan* which trips are most valuable.  Coal limits work the same way.
+Consider a plant rated at 420 MW of combined electrical capacity, yet allocated only 90 000 tonnes of coal for a given month.  At full load, both blocks together consume roughly 240 tonnes per hour — enough to exhaust the entire monthly budget in under 16 days.  The plant therefore cannot simply dispatch at maximum output whenever the electricity price is positive.
 
-The Schkopau plant receives a **monthly coal allocation** (e.g. 90 000 tonnes in April).  Every hour the plant runs, it burns coal.  A block at full load burns more coal per hour than a block at minimum load.  The optimiser must decide **when** to run and **at what power level** so that total monthly coal burn stays within the cap.
+More subtly, coal allocation is not just a question of *whether* to run, but of *when* and *at what level*.  A block at full load burns significantly more coal per hour than a block at minimum load.  The optimiser must allocate the limited coal stock to the hours where each tonne generates the highest marginal profit, balancing load levels, minimum-run-time commitments, and price volatility across the full month.
 
 ### 5.2  How coal consumption is modelled
 
@@ -416,7 +416,7 @@ This brings us directly to the next major topic.
 
 ### 7.1  What is a shadow price?
 
-Imagine you solved the monthly optimisation and found a total profit of €5 million.  Now suppose someone magically gave you **one extra tonne of coal** that month.  You re-solve and find €5 000 020.  The increase of €20 is the **shadow price** of coal in that month: the marginal value of relaxing the constraint by one unit.
+Suppose the monthly optimisation yields a total profit of €5 million.  Now suppose the coal limit were increased by **one tonne**.  Re-solving the model gives €5 000 020.  The increase of €20 is the **shadow price** of coal in that month: the marginal value of relaxing the constraint by one unit.
 
 In formal terms:
 
@@ -436,7 +436,15 @@ Think of an optimisation problem as a machine: you feed in constraints (rules), 
 
 For example, if the monthly coal limit is 90 000 tonnes and the dual value on that constraint is 20 EUR/t, it means: *relaxing the limit to 90 001 tonnes would increase profit by approximately €20.*
 
-Dual values are a **free bonus** that LP solvers compute alongside the optimal solution.  They come from the mathematical theory of linear programming (the "dual problem"), and every LP solver — including MOSEK — can report them automatically.
+Dual values are a **natural byproduct** that LP solvers compute alongside the optimal solution.  They come from the mathematical theory of linear programming (the "dual problem"), and every LP solver — including MOSEK — can report them automatically.
+
+**Important**: every constraint in the model has its own dual variable — not just the coal limits.  After the LP re-solve, the solver returns a dual value for *every* constraint: power upper/lower bounds, minimum up-time, minimum down-time, availability, start-up logic, and so on.  Each dual answers the same "what if" question for its respective constraint.  For example:
+
+- The dual on a **power upper bound** tells you how much additional profit one extra MW of capacity would yield in that specific hour — useful for evaluating capacity upgrades.
+- The dual on a **minimum up-time** constraint quantifies the cost of the 8-hour commitment: how much profit the plant sacrifices by being forced to stay on in the remaining low-price hours after a startup.
+- The dual on an **availability** constraint reveals the opportunity cost of a planned outage in a particular hour.
+
+The model currently extracts only the coal-limit duals because they have the most direct commercial application (spot coal procurement).  However, the infrastructure is general — reading any other dual requires only one additional line: `m.dual[<constraint>]`.
 
 **The catch**: dual values are only well-defined for **Linear Programmes (LP)**, where all variables are continuous (can take any fractional value like 127.3 MW).  In our model, many variables are **binary** (0 or 1 only) — the on/off switches.  A Mixed-Integer Linear Programme (MILP) has a jagged, staircase-like solution landscape where the concept of "loosen by a tiny bit" breaks down.  You cannot turn a block "half on."
 
