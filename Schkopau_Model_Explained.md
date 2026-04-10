@@ -46,24 +46,49 @@ The model reads a single Excel workbook with four tabs (sheets).
 
 ### 2.1  Block_A / Block_B tabs (one per generating unit)
 
-Each tab contains **one row per hour** of the planning horizon.  The key columns are:
+Each tab contains **one row per hour** of the planning horizon (28 columns).
+Both blocks share identical column names and layout.
 
-| Column | Meaning | Example |
-|--------|---------|---------|
-| **Date** | Calendar date of the hour | 2026-04-01 |
-| **Hour** | Hour of the day (0–23) | 14 |
-| **Price** | Day-ahead wholesale electricity price (EUR/MWh) | 62.30 |
-| **EUA** | Price of one EU emission allowance (EUR per tonne of CO₂) | 68.50 |
-| **Coal price** | Price of the coal blend (EUR per tonne or per MWh-thermal, depending on convention) | 12.40 |
-| **Grid fee (GRIDFEE)** | Network usage fee the plant pays when it draws power from the grid while offline (EUR/MWh) | 3.00 |
-| **Warme / DOW** | Thermal steam load delivered to the industrial neighbour (MW-thermal) | 130 |
-| **Pmin** | Minimum electrical output when a block is running (MW) | 110 |
-| **Pmax** | Maximum electrical output when a block is running (MW) | 210 |
-| **TC_PminN** | Total cost per MWh at minimum load (EUR/MWh) | 48.20 |
-| **TC_Pmax** | Total cost per MWh at full load (EUR/MWh) | 42.10 |
-| **coal conversion factor at pmin** | Coal burned (tonnes/h) when running at Pmin | 65 |
-| **coal conversion factor at pmax** | Coal burned (tonnes/h) when running at Pmax | 120 |
-| **unavailibility** | 1 = block is in planned outage this hour, 0 = available | 0 |
+Example values below come from **Block A, 2026-01-01 hour 20**
+(Block B values differ mainly in Pmax, efficiencies, and derived costs).
+
+| # | Column (exact header) | Meaning | Block A example | Block B example |
+|---|----------------------|---------|-----------------|-----------------|
+| 1 | **Date** | Calendar date | 2026-01-01 | 2026-01-01 |
+| 2 | **Hour** | Hour of the day (0–23) | 20 | 20 |
+| 3 | **Month** | Calendar month (1–12) | 1 | 1 |
+| 4 | **Price** | Day-ahead electricity price (EUR/MWh) | 75.04 | 75.04 |
+| 5 | **EUA** | EU emission allowance price (EUR/tCO₂) | 71.69 | 71.69 |
+| 6 | **Coal Price** | Raw coal price (EUR/GJ) | 9.88 | 9.88 |
+| 7 | **Grid fee** | Network fee charged when the block draws power offline (EUR/MWh) | 23.60 | 23.60 |
+| 8 | **Pmin** | Minimum electrical output when running (MW) | 155 | 155 |
+| 9 | **Pmax** | Maximum electrical output when running (MW) — **affected by seasonality** defined in the input file (sheets `A_Seaso.` / `B_Seaso.`); the value varies hour-by-hour across the year | 433.7 | 363.9 |
+| 10 | **Heating value [MJ/kg]** | Calorific value of the coal blend | 10.4 | 10.4 |
+| 11 | **Emission factor at Pmax [tCO₂/MWh]** | Direct CO₂ emission rate at full load | 1.008 | 1.026 |
+| 12 | **Emission factor at Pmin [tCO₂/MWh]** | Direct CO₂ emission rate at minimum load | 1.063 | 1.252 |
+| 13 | **Efficiency at Pmin [%]** | Thermal efficiency at Pmin (fraction) | 0.353 | 0.339 |
+| 14 | **Efficiency at Pmax [%]** | Thermal efficiency at Pmax (fraction) | 0.372 | 0.366 |
+| 15 | **Coal conversion factor at Pmax [t/MWh]** | Coal burned per MWh at full load | 0.930 | 0.946 |
+| 16 | **Coal conversion factor at Pmin [t/MWh]** | Coal burned per MWh at minimum load | 0.980 | 1.020 |
+| 17 | **CO2-Emmission factor at Pmin [tCO₂/MWh]** | Full-chain CO₂ per MWh at Pmin (incl. EUA cost) | 76.21 | 89.76 |
+| 18 | **CO2-Emmission factor at Pmax [tCO₂/MWh]** | Full-chain CO₂ per MWh at Pmax (incl. EUA cost) | 72.26 | 73.55 |
+| 19 | **Coal transportation costs [€/t]** | Logistics surcharge per tonne of coal | 0 | 0 |
+| 20 | **Coal costs at Pmax [€/MWh]** | Fuel cost component at full load | 9.18 | 9.34 |
+| 21 | **Coal costs at Pmin [€/MWh]** | Fuel cost component at minimum load | 9.69 | 10.08 |
+| 22 | **Total additional costs [€/MWh]** | Non-fuel variable costs (maintenance, ash, etc.) | 3.40 | 3.40 |
+| 23 | **unavailibility** | 1 = block is in planned outage this hour, 0 = available | 0 | 0 |
+| 24 | **Total generation costs at Pmax [€/MWh]** | All-in variable cost at full load (**TC_Pmax**) | 84.85 | 86.30 |
+| 25 | **Total generation costs at Pmin [€/MWh]** | All-in variable cost at minimum load (**TC_Pmin**) | 89.29 | 103.23 |
+| 26 | **MC** | Marginal cost used for merit-order screening (EUR/MWh) | 82.38 | 73.73 |
+| 27 | **Warme** | Thermal steam load owed to DOW (MW-thermal) | 27 | 27 |
+| 28 | **Weekday** | Day of week (0 = Monday … 6 = Sunday) | 3 | 3 |
+
+> **Notes on units and conventions**
+>
+> - *Coal conversion factor* values are in **t/MWh** (tonnes of coal per MWh of electrical output).
+> - *Efficiency* is a **fraction** (not percent) — the column header says `[%]` but the stored value is e.g. 0.372, not 37.2.
+> - *Total generation costs* (rows 24–25) already bundle fuel, EUA, transport, and additional variable costs into a single EUR/MWh figure; no further addition is needed in the model.
+> - **DOW (steam) allocation**: the `Warme` column records the contracted DOW load in **electrical MW** (i.e. the equivalent power consumed by the DOW unit).  DOW will be allocated to each block on a **separate, dedicated unit** rather than being split pro-rata.  Which block carries the DOW load is a user-configurable parameter (see `config.py`).
 
 #### Cost curve linearisation
 
@@ -76,7 +101,7 @@ Running costs are linearised between the two known operating points (Pmin and Pm
                         │                   ╱
                         │                 ╱    ← this line is cost_slope × P + cost_fixed
                         │               ╱
-        Cmin = TC_PminN × Pmin ─ ─ ─ ●
+        Cmin = TC_Pmin × Pmin ─ ─ ─ ●
                         │
                         └──────────────────────► Power P (MW)
                                 Pmin         Pmax
@@ -88,33 +113,104 @@ So the running cost in any hour is:
 
 $$\text{run\_cost}(t) = \text{cost\_slope}(t) \times P_{\text{eff}}(t) + \text{cost\_fixed}(t) \times \mathbb{1}[\text{on}]$$
 
-The same linearisation is applied to coal consumption (from coal conversion factor at pmin to coal conversion factor at pmax).
+#### Worked example — Block A, 2026-01-01 hour 20
+
+Using real input data:
+
+| Parameter | Value | Source |
+|-----------|-------|--------|
+| Pmin | 155 MW | Input column `Pmin` |
+| Pmax | 433.7 MW | Input column `Pmax` |
+| TC_Pmin | 89.29 EUR/MWh | `Total generation costs at Pmin [€/MWh]` |
+| TC_Pmax | 84.85 EUR/MWh | `Total generation costs at Pmax [€/MWh]` |
+| Price | 75.04 EUR/MWh | `Price` |
+| DOW | 27 MW | `Warme` |
+
+**Step 1 — Compute total cost at each operating point:**
+
+$$C_{\min} = 89.29 \times 155 = 13\,840 \text{ EUR/h}$$
+
+$$C_{\max} = 84.85 \times 433.7 = 36\,800 \text{ EUR/h}$$
+
+**Step 2 — Linearise:**
+
+$$\text{cost\_slope} = \frac{36\,800 - 13\,840}{433.7 - 155} = \frac{22\,960}{278.7} = 82.38 \text{ EUR/MW}$$
+
+$$\text{cost\_fixed} = 13\,840 - 82.38 \times 155 = 1\,071 \text{ EUR/h}$$
+
+**Step 3 — Running cost at a specific dispatch level:**
+
+If Block A runs at P = 300 MW with DOW = 27 MW, then $P_{\text{eff}} = 300 + 27 = 327$ MW:
+
+$$\text{run\_cost} = 82.38 \times 327 + 1\,071 = 27\,909 \text{ EUR/h}$$
+
+The electricity revenue from 300 MW at a price of 75.04 EUR/MWh would be $300 \times 75.04 = 22\,512$ EUR/h.  This hour would have **negative dispatch margin** ($22\,512 - 27\,909 = -5\,397$) before counting DOW steam revenue.
+
+> **Note**: The `MC` column in the input (82.38 EUR/MWh in this example) equals `cost_slope` — it is the **marginal cost** of the next MWh of output.  If the electricity price exceeds MC, producing one more MWh is profitable.  If the price is below MC (as here: 75.04 < 82.38), the block's dispatch margin is negative, but the solver may still keep it running due to DOW revenue, minimum-up-time commitments, or future high-price hours that justify the coal expenditure.
+
+#### Coal curve linearisation — same method
+
+Coal consumption uses the same approach with `Coal conversion factor at Pmin` (0.980 t/MWh) and `Coal conversion factor at Pmax` (0.930 t/MWh):
+
+$$C_{\text{coal,min}} = 0.980 \times 155 = 151.9 \text{ t/h}$$
+
+$$C_{\text{coal,max}} = 0.930 \times 433.7 = 403.3 \text{ t/h}$$
+
+$$\text{coal\_slope} = \frac{403.3 - 151.9}{433.7 - 155} = \frac{251.4}{278.7} = 0.902 \text{ t/MW}$$
+
+$$\text{coal\_fixed} = 151.9 - 0.902 \times 155 = 12.1 \text{ t/h}$$
+
+At P_eff = 327 MW: coal = $0.902 \times 327 + 12.1 = 307.0$ tonnes/hour.
+
+The same linearisation is applied to coal consumption (from Coal conversion factor at Pmin to Coal conversion factor at Pmax).
 
 ### 2.2  Starts tab (start-up tiers)
 
-Start-up costs and ramp duration depend on how long the block has been offline.  The Starts tab defines **five start-up tiers** for each block:
+Start-up costs and ramp duration depend on how long the block has been offline.
+The Starts tab defines **five start-up tiers** for each block, with a **ramp profile**
+(power output in MW for hours 1–4 after start) and a **lump-sum start-up cost** in EUR.
 
-| Tier | Hours offline | Typical cost (EUR) | Ramp behaviour |
-|------|--------------|-------------------|----------------|
-| **Very hot** | 0 – 5 h | Low | Fast ramp-up |
-| **Hot** | 5 – 10 h | Medium-low | Moderate ramp |
-| **Warm** | 10 – 60 h | Medium | Slower ramp |
-| **Cold** | 60 – 100 h | High | Slow ramp |
-| **Very cold** | 100+ h | Highest | Slowest ramp |
+#### Block A
 
-Each tier provides a **ramp profile** (power output for hours 0 through 3 after starting) and a **lump-sum start-up cost** in EUR.
+| Tier | Hours offline | 1 h | 2 h | 3 h | 4 h | Cost (EUR) |
+|------|--------------|----:|----:|----:|----:|-----------:|
+| **Very hot** | < 5 h | 262 | 397 | 440 | — | 23 161 |
+| **Hot** | 5 – 10 h | 170 | 262 | 440 | — | 25 510 |
+| **Warm** | 10 – 60 h | 216 | 433 | 440 | — | 38 291 |
+| **Cold** | 60 – 100 h | 203 | 235 | 440 | — | 39 910 |
+| **Very cold** | > 100 h | 30 | 180 | 397 | 440 | 60 251 |
 
-**Important**: although all five tiers are read from the input, the optimiser only uses **three** of them: **hot**, **warm**, and **very cold**.  The "very hot" and "cold" tiers are parsed for reference but never appear in the model's constraints or objective.  The warm tier serves as the baseline start-up cost, with the hot and very-cold tiers applying cost adjustments relative to it.
+#### Block B
+
+| Tier | Hours offline | 1 h | 2 h | 3 h | 4 h | Cost (EUR) |
+|------|--------------|----:|----:|----:|----:|-----------:|
+| **Very hot** | < 5 h | 262 | 397 | 440 | — | 23 161 |
+| **Hot** | 5 – 10 h | 59 | 262 | 440 | — | 25 510 |
+| **Warm** | 10 – 60 h | 203 | 289 | 440 | — | 38 291 |
+| **Cold** | 60 – 100 h | 203 | 289 | 440 | — | 39 910 |
+| **Very cold** | > 100 h | 80 | 235 | 397 | 440 | 60 251 |
+
+> **Note**: A "—" means the block has already reached full capacity by that hour.
+> The very cold tier is the only one that needs all four ramp hours.
+
+**All four active tiers** — **hot**, **warm**, **cold**, and **very cold** — are fully implemented in both the optimiser constraints and objective.  The *very hot* tier (off < 5 h) is structurally impossible because the minimum-down-time constraint forces a block to stay off for at least 6 hours after shutdown, so it never appears in practice.
 
 ### 2.3  Coal_constrains tab (monthly coal limits)
 
-Specifies the maximum coal consumption (in kilo-tonnes) across both blocks combined for each calendar month:
+Specifies the maximum coal consumption across both blocks combined for each calendar month,
+plus a separate DOW coal allocation:
 
-| Year | Month | Limit (kt) |
-|------|-------|-----------|
-| 2026 | 4     | 90        |
-| 2026 | 5     | 95        |
-| …    | …     | …         |
+| Year | Month | Remaining coal volume (kt) | DOW coal volume (kt) |
+|------|-------|---------------------------:|---------------------:|
+| 2026 | Apr | 111 | 13 |
+| 2026 | May | 129 | 11 |
+| 2026 | Jun | 130 | 10 |
+| 2026 | Jul | 231 | 11 |
+| 2026 | Aug | 229 | 14 |
+| 2026 | Sep | 206 | 14 |
+| 2026 | Oct | 295 | 14 |
+| 2026 | Nov | 335 | 14 |
+| 2026 | Dec | 320 | 14 |
 
 These limits are the binding scarcity constraint in most scenarios (see Sections 5–6).
 
@@ -181,17 +277,20 @@ The components are:
    - Hot start adjusts: $+(\text{hot\_cost} - \text{warm\_cost}) \times \text{hot\_start}$
    - Very-cold start adjusts: $+(\text{vcold\_cost} - \text{warm\_cost}) \times \text{vcold\_start}$
 
-4. **OFF costs** — when the entire plant is offline, it still draws auxiliary power from the grid (own consumption of 10 MW, plus 130 MW for the DOW consumer's electric backup when DOW opportunity-cost mode is active).  The cost is $(\text{Price} + \text{Grid fee}) \times \text{off\_consumption}$.
+4. **OFF costs** — when the entire plant is offline, the model charges two components:
+   - **House power**: the plant's own auxiliary consumption (10 MW) is charged at $(\text{Price} + \text{Grid fee})$ per MWh in both DOW modes.
+   - **DOW mode ON** (`USE_DOW_OPPORTUNITY_COSTS = True`): the DOW consumer's electric backup (130 MW) is charged at the **grid fee only** (not the market price), minus a partial compensation of 6.9 EUR/MWh.
+   - **DOW mode OFF** (`USE_DOW_OPPORTUNITY_COSTS = False`): a fixed offline penalty of 3 420 EUR/h is added (representing contracted obligations unrelated to DOW).
 
 5. **DOW revenue** — steam delivery income credited whenever at least one block is on.
 
 ### 3.4  DOW opportunity costs
 
 When the plant is fully offline, the industrial DOW consumer switches to its own electric heating, drawing approximately 130 MW from the grid.  The model can be configured to account for this via the `USE_DOW_OPPORTUNITY_COSTS` flag:
-- When enabled: a partial compensation of 6.9 EUR/MWh is deducted (the plant reimburses the neighbour), and the full 130 MW of grid draw is charged at market price + grid fee.  DOW revenues (188 EUR/MW × DOW) are credited when at least one block runs.
-- When disabled: OFF costs still include the plant's own consumption (10 MW), but the 130 MW DOW backup and DOW revenues are excluded.
+- **When enabled** (`True`): the 130 MW DOW backup is charged at the **grid fee only** (not the market price), and a partial compensation of 6.9 EUR/MWh is subtracted.  DOW revenues (188 EUR/MW × DOW) are credited when at least one block runs.  The 10 MW house power is always charged at Price + grid fee.
+- **When disabled** (`False`): OFF costs include the plant's 10 MW house power (at Price + grid fee) plus a **fixed offline penalty of 3 420 EUR/h** (`OFFLINE_FIXED_PENALTY_NO_DOW`).  The 130 MW DOW backup and DOW revenues are excluded.
 
-This makes shutting down more expensive than it first appears when DOW accounting is active, accurately reflecting the contractual reality.
+In both modes shutting down is significantly more expensive than it first appears, incentivising the solver to keep at least one block online.
 
 ---
 
@@ -243,28 +342,74 @@ In the start-up hour, output must equal exactly Pmin (plus boost if both blocks 
 
 $$P_{b,t} = P_{\min,b,t} \times \text{on}_{b,t} + \text{boost} \times \text{both\_on}_t \qquad \text{(when startup}_{b,t} = 1\text{)}$$
 
-Symmetrically, in the hour before shutdown, output must return to Pmin.  Both rules are implemented as Big-M constraints that activate only when the respective startup or shutdown indicator equals 1.
+Symmetrically, in the hour before shutdown, output must return to Pmin.  Both rules are implemented as **Big-M constraints** that activate only when the respective startup or shutdown indicator equals 1.
 
-#### Big-M tightening
+#### What is a Big-M constraint and why does it matter?
 
-Big-M constraints use a large constant $M$ to "turn off" parts of a constraint.  A loose $M$ (e.g. 500) works mathematically but weakens the LP relaxation — the solver sees a huge feasible region that does not reflect reality, making it harder to find good bounds and prune the branch-and-bound tree.
+A Big-M constraint is a modelling trick that lets you write "this rule only applies when a binary variable equals 1".  The idea is to add a large constant $M$ that "deactivates" the constraint when the binary is 0.
 
-The model computes **per-(block, hour) tight Big-M values** instead of using a single global constant:
+**Concrete example — startup power pinning (upper bound):**
+
+We want: *"When `startup = 1`, power P must be ≤ Pmin + boost."*  But we can't write a constraint that only exists conditionally.  Instead, we write:
+
+$$P_{b,t} \le (P_{\min} + \text{boost}) + M \times (1 - \text{startup}_{b,t})$$
+
+- **When `startup = 1`**: the $M$ term vanishes → $P \le P_{\min} + \text{boost}$.  The constraint is **active** and forces power to minimum.
+- **When `startup = 0`**: the $M$ term adds $M$ to the right side → $P \le P_{\min} + \text{boost} + M$.  If $M$ is large enough, this is never binding — the constraint is effectively **switched off**, and P is free to be anywhere up to Pmax.
+
+The **problem** is: what value should $M$ have?
+
+- **Too large** (e.g. $M = 500$): mathematically correct, but when MOSEK solves the LP relaxation (where `startup` can be fractional, e.g. 0.3), it sees $P \le 160 + 500 \times 0.7 = 510$.  This 510 MW upper bound is far above any physical reality (Pmax is 434 MW at most).  The LP relaxation is "loose" — it allows solutions that can never occur in practice.  MOSEK's branch-and-bound must explore many more nodes to prove these solutions are impossible, wasting time.
+
+- **Just right** (e.g. $M = 280$): when `startup = 0.3`, the LP relaxation sees $P \le 160 + 280 \times 0.7 = 356$.  This is much closer to the real Pmax (434 MW), so the LP relaxation gives tighter bounds.  MOSEK can prune more branches and converge faster.
+
+#### How the model computes tight Big-M values
+
+The model computes **per-(block, hour) tight Big-M values** instead of using a single global constant.  For each (block, hour), the tightest valid $M$ is the difference between the maximum and minimum possible values of $P$:
 
 - **Upper-bound M**: $M_{ub}(b,t) = P_{\max}(b,t) - P_{\min}(b,t) + 1$
-- **Lower-bound M**: $M_{lb}(b,t) = P_{\min}(b,t) + \text{boost} + 1$
+  *"How far above Pmin can P go? That's the largest gap the constraint ever needs to cover."*
 
-For a typical block with $P_{\max} = 290$ and $P_{\min} = 161$, this gives $M_{ub} = 130$ and $M_{lb} = 167$ — far smaller than the old global value of 500.  The tighter bounds help MOSEK's LP relaxation cut more aggressively, resulting in faster solve times and smaller optimality gaps.
+- **Lower-bound M**: $M_{lb}(b,t) = P_{\min}(b,t) + \text{boost} + 1$
+  *"How far above zero can P go when the block is on? That's the largest the lower-bound constraint needs."*
+
+#### Worked example with real Schkopau parameters
+
+**Block A** (from Section 2.1: Pmin = 155 MW, Pmax = 433.7 MW, boost = 5 MW):
+
+$$M_{ub} = 433.7 - 155 + 1 = 279.7 \approx 280$$
+
+$$M_{lb} = 155 + 5 + 1 = 161$$
+
+**Block B** (Pmin = 155 MW, Pmax = 363.9 MW):
+
+$$M_{ub} = 363.9 - 155 + 1 = 209.9 \approx 210$$
+
+$$M_{lb} = 155 + 5 + 1 = 161$$
+
+| Block | $M_{ub}$ (tight) | $M_{lb}$ (tight) | Old global M |
+|-------|----------------:|----------------:|-------------:|
+| A | **280** | **161** | 500 |
+| B | **210** | **161** | 500 |
+
+The tight values are 40–60% smaller than the old global M = 500.  This directly tightens the LP relaxation at every branch-and-bound node.  In practice, this reduces solve times and helps MOSEK close the optimality gap faster — fewer nodes need to be explored because the LP bounds are closer to the integer-feasible region.
 
 ### 4.7  Start-up tier detection
 
 The start-up tier is determined by how long the block has been offline:
 
-- **Hot start**: the block was ON somewhere in the previous 10 hours ($\text{on}_{b, t-10} = 1$).
-- **Very cold start**: the block was OFF at every 8-hour checkpoint over the past 56 hours (checks at offsets 8, 16, 24, 32, 40, 48, 56).
-- **Warm start**: everything in between (the "default" tier).
+### 4.7  Start-up tier detection
 
-Binary variables `hot_start` and `vcold_start` are linked to `startup` so that if a start occurs, exactly one tier applies.
+The start-up tier is determined by how long the block has been offline.  Four tiers are active in the model, selected by two lookback rules:
+
+- **Hot start** (5–10 h off): $\text{on}_{b, t-10} = 1$ — the block was on 10 hours ago.
+- **Cold start** (60–100 h off): all warm-zone checkpoints (at offsets 8, 16, …, 56 h) are 0, but at least one cold-zone checkpoint (at 64, 72, 80, 88, 96 h) is 1.
+- **Very cold start** (≥ 100 h off): all checkpoints up to 100 h (warm + cold zones) are 0.
+- **Warm start** (10–60 h off): the default — applies when none of the above conditions hold.
+
+Binary variables `hot_start`, `cold_start`, and `vcold_start` are linked to `startup` with mutual-exclusivity constraints so that if a start occurs, exactly one tier applies (or none, which means warm).
+
+The *very hot* tier (off < 5 h) is structurally impossible because `MIN_DOWN = 6 h`; it has no binary variable.
 
 ### 4.8  Both-on and plant-off linearisation
 
@@ -278,9 +423,11 @@ This ensures `both_on = 1` if and only if **both** blocks are simultaneously on.
 
 The model has two ramp modes, controlled by the `USE_SIMPLE_STARTUP_RAMP` flag:
 
-- **Simple mode (default, `True`)**: No detailed ramp constraints.  The `in_ramp` variable is fixed to 0 for all hours, so the standard Pmin lower bound applies from the first hour of startup.  This is the current production setting.
+- **Simple mode (`True`)**: No detailed ramp constraints.  The `in_ramp` variable is fixed to 0 for all hours, so the standard Pmin lower bound applies from the first hour of startup.  This mode remains available as a fast fallback.
 
-- **Detailed mode (`False`)**: When enabled, the model limits the power output during the first few hours after a start to follow the physical ramp profile read from the Starts tab.  Each tier has its own ramp: a hot start ramps faster than a very-cold start.  The `in_ramp` variable tracks whether a block is still in its ramp-up window, and Big-M constraints relax the Pmin lower bound during ramp hours to allow the lower ramp-profile power levels.
+- **Detailed mode (current, `False`)**: The model limits output during startup hours to follow the configured ramp profiles.  The `in_ramp` variable tracks the startup window, and Big-M constraints relax the Pmin lower bound during ramp hours to allow lower profile levels.  This is the currently used mode.
+
+**Important implementation detail**: the ramp envelope constraints start from hour **h = 1** after the startup, not h = 0.  Hour 0 (the startup hour itself) is already pinned to exactly Pmin by the `startup_requires_pmin_lb/ub` constraints (Section 4.6).  Applying a separate ramp bound at h = 0 would create contradictory constraints and could make the model infeasible.  The warm-start heuristic mirrors this by skipping ramp-profile power overrides at h = 0.
 
 ---
 
@@ -325,119 +472,548 @@ When the coal limit is not binding, the plant dispatches whenever electricity re
 
 ### 5.5  Warm-start heuristic: constructing a coal-feasible initial schedule
 
-Before launching the MILP solver, the model constructs an **initial feasible schedule** (warm start) that provides MOSEK with a high-quality incumbent solution.  A good warm start reduces solve time from hours to minutes by enabling the branch-and-bound algorithm to start from a near-optimal baseline.
+Before launching the MILP solver, the model constructs an **initial feasible schedule** (warm start) that provides MOSEK with a high-quality starting point.  Without a warm start, MOSEK would have to search blindly through billions of possible on/off combinations.  With a warm start, it already has a good answer and can focus on improving it.  In practice, this reduces solve time from hours to minutes.
 
-The heuristic proceeds through several phases, with coal awareness being the most critical.
+The warm-start heuristic lives in a single Python function called `warm_start_heuristic(m)` in `model_builder.py`.  It takes the Pyomo model object `m` as input and directly modifies the `.value` property on each Pyomo variable.  Think of it as filling in a spreadsheet: the model has thousands of cells (variables) that are initially empty; the heuristic fills them in with a reasonable first guess.
+
+The heuristic proceeds through **five clearly separated phases**.  Each phase builds on the results of the previous one.
+
+---
 
 #### Phase 1 — Start with "everything ON"
 
-The heuristic begins with the most optimistic assumption: **every block is ON in every hour** (except when physically unavailable due to planned outages).  It checks the unavailability flag for each block and hour — if a block is marked unavailable, it is forced OFF.  It also respects the initial state: if config says Block A starts OFF (via `INITIAL_ON = {"A": 0, "B": 1}`), then hour 0 of Block A is set to OFF.
+**Goal**: Create a list of ON/OFF decisions for each (block, hour) pair, starting from the most optimistic possible schedule.
 
-After this, the heuristic runs 3 cleanup passes to enforce **minimum down-time**: whenever a block transitions from ON to OFF (whether due to an outage or other reason), the subsequent 6 hours are forced OFF.  This reflects the physical requirement for turbine cooling.  The passes repeat to resolve cascading effects — e.g. a forced-off period may create an ON-gap shorter than the minimum up-time.
+**What the code does, step by step:**
 
-The result of Phase 1 is a schedule where both blocks run as much as physically possible.  This schedule is almost certainly **not coal-feasible** — sustained maximum-availability operation would consume far more coal than the monthly limits allow.
+**Step 1 — Create an empty schedule.**
+
+The code creates a Python dictionary called `on_hint`.  For each block (A and B), it stores a list of integers — one per hour.  A value of `1` means "ON", and `0` means "OFF".
+
+```python
+on_hint = {}
+for b in ["A", "B"]:
+    on_b = [0] * number_of_hours   # start with all zeros
+```
+
+**Step 2 — Turn on everything that is physically available — no price comparison.**
+
+The code loops through every hour.  If the `unavailibility` parameter for this (block, hour) is ≥ 0.5 (i.e. the block is in a planned outage), it stays OFF.  Otherwise, it is set to ON — **regardless of whether the electricity price covers the variable cost**.  The heuristic never compares price vs. marginal cost; economic optimisation is left entirely to MOSEK.
+
+```python
+for t in range(number_of_hours):
+    if unavailibility[b, t] >= 0.5:
+        on_b[t] = 0    # outage — can't run
+    else:
+        on_b[t] = 1    # available — turn it ON unconditionally
+```
+
+This intentionally over-dispatches (running unprofitable hours), but MOSEK corrects this during the MIP solve.  The warm-start estimated objective printed before solving (e.g. `−5,270,162 EUR`) looks poor for exactly this reason — all startup costs are charged on the forced startups but the full revenue optimisation has not happened yet.
+
+**Step 3 — Respect the initial state.**
+
+The first hour (t=0) is special.  The config file specifies which blocks start ON or OFF at the beginning of the planning horizon.  For example, `INITIAL_ON = {"A": 0, "B": 1}` means Block A starts OFF and Block B starts ON.  The code overwrites hour 0 accordingly:
+
+```python
+on_b[0] = INITIAL_ON[b]   # e.g. 0 for Block A, 1 for Block B
+```
+
+**Step 4 — Enforce minimum down-time (3 passes).**
+
+Whenever the code sees a transition from ON to OFF (i.e. `on_b[i-1] == 1` and `on_b[i] == 0`), it forces the **next 6 hours** to also be OFF.  This reflects the physical requirement: once a block shuts down, it needs at least 6 hours for the turbine to cool before it can restart.
+
+The code runs this check 3 times (3 "passes"), because forcing hours OFF can create new transitions that need their own 6-hour cooldown.  For example:
+
+```
+Pass 1: Outage at hour 50 → OFF hours 50-55
+Pass 2: The new OFF at hour 55 might conflict with another period → extend
+Pass 3: Resolve any remaining cascades
+```
+
+**Step 5 — Print a summary.**
+
+After Phase 1, the code prints how many hours each block is ON:
+
+```
+Phase 1 block A: 6200 ON / 6552 total (6400 avail, 152 unavail = 98% availability)
+Phase 1 block B: 6350 ON / 6552 total (6500 avail, 52 unavail = 99% availability)
+```
+
+It also prints the exact dates of each unavailability (outage) period.
+
+**Result of Phase 1**: Both blocks are ON in almost every available hour.  This schedule maximises running time but ignores economics (price vs. cost) and **almost certainly exceeds the monthly coal budgets**.  The next sub-phases correct these issues.
+
+---
 
 #### Phase 1b — Trim the schedule to fit within coal budgets
 
-This is where coal awareness happens.  The heuristic goes through each constrained month one by one:
+**Goal**: Remove enough ON-hours so that each month's coal consumption stays within its limit.  Remove the *least valuable* hours first (lowest electricity price) — still no price-vs-cost check, just revenue ranking.
 
-**Step 1 — Compute how much coal each (block, hour) slot would burn.**
+**This phase only runs when `USE_COAL_CONSTRAINS = True`** in `config.py`.  When coal constraints are off, the schedule from Phase 1 is passed directly to Phase 1c.
 
-For every block and every hour, the code calculates the coal consumption if that block runs at its **minimum possible output**.  This minimum accounts for two factors that raise the floor above raw Pmin:
+**Step-by-step:**
 
-- **DUAL_BLOCK_BOOST**: When both blocks are ON simultaneously, the model's `p_lower` constraint forces $P \ge P_{\min} + 5\text{ MW}$.  The heuristic checks whether both blocks are ON in each hour and adds the 5 MW boost accordingly.  Failing to account for this would underestimate coal consumption by approximately 2 000–3 000 tonnes per month, potentially producing a warm-start schedule that violates the coal limit when the solver enforces the boost constraint.
+**Step 1 — Pre-compute the coal rate for every (block, hour) slot.**
 
-- **DOW steam load**: For the primary DOW block (Block A), when `USE_DOW_OPPORTUNITY_COSTS = True`, Pmin includes the DOW steam load: the boiler must produce $P_{\min} + \text{boost} + \text{DOW}$ of thermal output.  This means the coal rate per hour for Block A is higher than for Block B in the same hour (Block B only picks up DOW when Block A is off).
+Before trimming, the code needs to know: "If block B runs at minimum output in hour 3042, how many tonnes of coal does it burn?"
 
-In code:
-```
-both = 1 if all(on_hint[bb][t] == 1 for bb in blocks) else 0
-boost = DUAL_BLOCK_BOOST × both
-p_eff_min = Pmin + boost + DOW
-coal_rate_min = coal_slope × p_eff_min + coal_fixed
-```
+For each (block, hour), it computes:
 
-This gives a coal consumption rate — in tonnes per hour — for each (block, hour) combination.
+<pre class="annotated">
+<span class="c1"># Check: are both blocks ON in this hour?</span>
+both = 1 if (on_hint["A"][t] == 1 and on_hint["B"][t] == 1) else 0
+<span class="c2"># When both blocks run, the p_lower constraint forces P ≥ Pmin + 5 MW</span>
+boost = 5.0 * both
+<span class="c3"># DOW steam (27 MW) only adds to Block A when DOW accounting is on</span>
+dow = DOW[t] if (b == "A" and USE_DOW_OPPORTUNITY_COSTS) else 0.0
+<span class="c4"># Minimum effective load = electrical Pmin + dual-block boost + DOW steam</span>
+p_eff_min = Pmin[b, t] + boost + dow
+<span class="c5"># Coal burned per hour at this minimum load (linear formula from Section 2.1)</span>
+coal_rate = coal_slope[b, t] * p_eff_min + coal_fixed[b, t]
+</pre>
 
-**Step 2 — Add up total coal for the month and compare to the limit.**
+#### Concrete example — coal rate for Block A, January hour 20
 
-The code sums up the coal from all (block, hour) slots that are currently set to ON in this month.  It then compares this total to the **full monthly limit** (100% of the limit from the Coal_constrains tab).
+Using real Schkopau parameters where both blocks are ON and DOW accounting is enabled:
 
-Why the full limit and not a safety margin?  Because the heuristic computes coal at minimum output — this is already a conservative estimate.  The subsequent Phase 2 P-scaling step (described below) distributes any remaining coal headroom by raising power levels above Pmin proportionally.  Adding a safety margin on top of the Pmin estimate would over-prune the schedule, turning off hours that the solver could have used productively.
+| Parameter | Value | Source |
+|-----------|-------|--------|
+| Pmin (Block A) | 155 MW | Input column |
+| DOW (Warme) | 27 MW | Input column |
+| DUAL_BLOCK_BOOST | 5 MW | Config |
+| coal_slope | 0.902 t/MW | Linearised from coal conv. factors |
+| coal_fixed | 12.1 t/h | Linearised from coal conv. factors |
 
-**Step 3 — If over budget: turn off the cheapest slots first.**
+Both blocks are ON, so `boost = 5`.  Block A carries the DOW steam:
 
-If the month's coal consumption exceeds the limit, the heuristic must turn some (block, hour) slots OFF to save coal.  But which ones?
+$$p_{\text{eff,min}} = 155 + 5 + 27 = 187 \text{ MW}$$
 
-All ON slots for the month are collected and **sorted by electricity price in ascending order**.  The heuristic then iterates through this list, switching slots OFF starting with the lowest-price hours and subtracting each slot's coal consumption from the running excess.  The process terminates as soon as total coal falls within the limit.  This prioritises retaining the highest-value hours.
+$$\text{coal\_rate} = 0.902 \times 187 + 12.1 = 180.8 \text{ t/h}$$
 
-**A concrete example from the model output:**
+For Block B in the same hour (no DOW):
+
+$$p_{\text{eff,min}} = 155 + 5 + 0 = 160 \text{ MW}$$
+
+$$\text{coal\_rate} = 0.946 \times 160 + 9.8 = 161.2 \text{ t/h}$$
+
+Both blocks together: **342 t/h** at minimum load.  Over 720 hours in a month, that would be 246 000 tonnes — well above most monthly limits (e.g. 111 kt for April).  This is why coal trimming is critical.
+
+**Why include boost and DOW in coal rates?**  Because these raise the actual load on the boiler.  If the heuristic ignored them, it would *underestimate* coal consumption by ~2 000–3 000 tonnes per month.  The resulting warm-start schedule would violate the coal limit when the solver enforces the `p_lower` constraint (which requires $P \ge P_{\min} + 5$ when both blocks are on).
+
+**Step 2 — For each constrained month, add up total coal.**
+
+The code loops through each month that has a coal limit (e.g. April 2026 with a limit of 111 000 tonnes).  It sums up the coal from all ON-slots in that month:
+
+<pre class="annotated">
+<span class="c1"># Sum coal from every (block, hour) that is currently ON this month</span>
+total_coal = 0
+for b in ["A", "B"]:
+    for t in april_hours:                <span class="c2"># e.g. hours 0..719 for April</span>
+        if on_hint[b][t] == 1:           <span class="c3"># only count slots that are ON</span>
+            total_coal += coal_rate[b, t] <span class="c4"># add this slot's coal (e.g. 180.8 t/h for Block A)</span>
+</pre>
+
+If `total_coal <= limit`, this month is fine — move to the next month.
+
+**Step 3 — If over budget, turn off the cheapest hours first.**
+
+If `total_coal > limit`, the code must switch some slots OFF.  The key question is: *which hours should be turned off?*
+
+The answer: **the hours where electricity is cheapest**.  Running during a 20 EUR/MWh hour is far less valuable than running during an 80 EUR/MWh hour.  So the code:
+
+1. Collects all ON-slots for this month: `[(price, coal_rate, block, hour), ...]`
+2. Sorts them by price (lowest first).
+3. Walks through the list, turning each slot OFF and subtracting its coal from the excess:
+
+<pre class="annotated">
+<span class="c1"># How much coal do we need to remove?</span>
+excess = total_coal - limit              <span class="c2"># e.g. 246,000 - 111,000 = 135,000 tonnes</span>
+n_off = 0
+
+for price, rate, block, hour in sorted_slots:
+    if excess <= 0:                      <span class="c3"># we've freed up enough coal — stop</span>
+        break
+    on_hint[block][hour] = 0             <span class="c4"># turn this slot OFF (saves coal)</span>
+    excess -= rate                       <span class="c5"># subtract its coal, e.g. 180.8 t/h</span>
+    n_off += 1                           <span class="c6"># count how many slots we removed</span>
+</pre>
+
+**Concrete April 2026 example with real numbers:**
+
+- Both blocks ON for all 720 April hours → 1 440 (block, hour) slots
+- Average coal per slot at Pmin: ~171 t/h (mix of Block A at 180.8 and Block B at 161.2)
+- Total coal at Pmin: 1 440 × 171 ≈ 246 000 tonnes
+- April limit: 111 000 tonnes (from Coal_constrains tab)
+- Excess: 135 000 tonnes → must turn off 135 000 / 171 ≈ **790 slots**
+- These 790 slots are the cheapest-price hours across both blocks
+
+After trimming, April has ~650 ON-slots (325 per block), concentrated in the highest-price hours.  Both blocks are completely OFF during cheap overnight and weekend hours.
+
+4. Prints how many slots were turned off:
 
 ```
 Heuristic coal cut 2026-04: turned off 474 slots (coal@Pmin 207671t > eff.limit 155000t)
 ```
 
-This tells us:
-- In April 2026, if both blocks ran wherever available at Pmin (including the DUAL_BLOCK_BOOST and DOW steam load), they would burn **207 671 tonnes** of coal.
-- The effective limit is **155 000 tonnes** (the full monthly cap).
-- To get below 155 000 tonnes, the heuristic had to turn off **474 (block, hour) slots** — the 474 cheapest-price hours across both blocks.
+**Why use the full limit (100%), not a safety margin?**  Because we computed coal rates at *minimum* output.  The actual coal consumption will be higher once the P-scaling step (Phase 2) raises power levels.  But P-scaling distributes headroom *proportionally* — it never exceeds the limit.  Using a safety margin here would over-prune, removing hours that the solver could profitably use.
 
-After this trimming, April's warm-start schedule has both blocks ON during the highest-price hours and OFF during the lowest-price hours, with total coal consumption at Pmin safely within the limit.  The subsequent P-scaling step then uses the remaining headroom to push power above Pmin in all non-pinned hours.
+**Important detail**: slots where `on[b, t].fixed` is True (i.e. the initial-condition hours that Pyomo has locked) are skipped — the heuristic cannot override decisions that are fixed by boundary conditions.
 
-#### Phase 1c — Final cleanup: enforce min-up and min-down again
+---
 
-Turning off hundreds of slots may have created new violations:
-- A block might now be ON for only 3 consecutive hours (violating the 8-hour minimum up-time).
-- A block might be OFF for only 4 hours between two ON periods (violating the 6-hour minimum down-time).
+#### Phase 1c — Re-enforce min-up and min-down after coal trimming
 
-The heuristic runs up to 10 cleanup passes per block:
-- **Minimum down-time**: if a block goes from ON to OFF, the next 6 hours are forced OFF.
-- **Minimum up-time**: if a block is ON for fewer than 8 consecutive hours, the entire short ON-period is turned OFF (it is not economical to start up for so few hours).
+**Goal**: The coal trimming in Phase 1b may have created schedule violations.  For example, if the heuristic turned off hours 100, 103, and 107 to save coal, Block A might now have a run of only 3 hours (101–103), violating the 8-hour minimum up-time.  This phase cleans those up.
 
-These passes repeat until no more changes are needed (the schedule stabilises).
+**What happens:**
 
-#### Phase 2 — Set all derived variables and scale power levels
+1. **Restore fixed variables.** Any hour that is locked by the model (`on[b,t].fixed`) gets its value copied back into `on_hint` — the heuristic never overrides Pyomo's fixed initial conditions.
 
-Once the on/off schedule is finalised, the heuristic fills in all remaining variable values so the warm start is internally consistent:
+2. **Run up to 10 cleanup passes per block.** Each pass does two things:
 
-- **Startup and shutdown flags**: if block goes from OFF to ON, startup = 1; from ON to OFF, shutdown = 1.
-- **Start-up tier classification**: based on how long the block was off before starting (< 10 hours → hot, 10–59 hours → warm, ≥ 60 hours → very cold).
-- **Power levels**: initially set to $P_{\min}$ (+ 5 MW boost if both blocks are on).
-- **both_on and plant_off**: set based on the per-block on/off states.
+   **a) Enforce minimum down-time:** Scan left to right.  Wherever the schedule goes from ON to OFF, force the next 6 hours OFF:
 
-#### Phase 2 P-scaling — distribute coal headroom across ON hours
+<pre class="annotated">
+i = 0
+while i < number_of_hours:                              <span class="c1"># scan left to right</span>
+    if on_hint[b][i] == 0 and i > 0 and on_hint[b][i-1] == 1:
+                                                         <span class="c2"># ON→OFF transition detected</span>
+        for k in range(6):                               <span class="c3"># force 6 hours of cooldown</span>
+            if i + k < number_of_hours and not fixed[b, i+k]:
+                on_hint[b][i + k] = 0                    <span class="c4"># set this hour to OFF</span>
+        i += 6                                           <span class="c5"># jump past the forced-off block</span>
+    else:
+        i += 1                                           <span class="c6"># no transition — advance one hour</span>
+</pre>
 
-After setting power to Pmin, the heuristic has a coal-feasible schedule — but one that wastes coal headroom.  If the monthly limit is 130 000 tonnes and coal at Pmin totals 110 000 tonnes, there are 20 000 tonnes of unused budget.  The P-scaling step uses this headroom to push power levels **above Pmin toward Pmax**, giving MOSEK a better starting point.
+   **b) Enforce minimum up-time:** Scan left to right.  Find each contiguous run of ON-hours.  If the run is shorter than 8 hours, turn the entire run OFF:
 
-The procedure for each constrained month:
+<pre class="annotated">
+i = 0
+while i < number_of_hours:
+    if on_hint[b][i] == 1 and (i == 0 or on_hint[b][i-1] == 0):
+                                                  <span class="c1"># found the START of an ON-run</span>
+        j = i
+        while j < number_of_hours and on_hint[b][j] == 1:
+            j += 1                                <span class="c2"># find where the run ends</span>
+        run_length = j - i                        <span class="c3"># e.g. 5 hours</span>
+        if run_length < 8:                        <span class="c4"># too short! 8 hours minimum required</span>
+            for k in range(i, j):
+                if not fixed[b, k]:
+                    on_hint[b][k] = 0             <span class="c5"># turn the whole run OFF</span>
+        i = max(j, i + 1)                         <span class="c6"># jump past this run</span>
+    else:
+        i += 1                                    <span class="c7"># not a run start — advance one hour</span>
+</pre>
 
-1. **Compute coal at current P** — sum coal consumption across all ON slots at their current power level (Pmin + boost).
+   **Why turn off too-short runs instead of extending them?**  Extending would require adding ON-hours that might violate coal limits.  Turning them off is safe — it only saves coal — and the solver can always re-enable them if it finds a better solution.
 
-2. **Compute headroom** — $\text{coal\_headroom} = \text{limit} - \text{coal\_at\_pmin}$.  If zero or negative, skip this month.
+3. **Repeat until stable.** Each pass may create new violations (e.g. turning off a short run might make an adjacent run too short).  The loop repeats until no changes are made, or until 10 passes have been executed.
 
-3. **Collect growable slots** — ON hours where power can be increased.  Two types of hours are **excluded**:
-   - **Startup hours**: P must stay at Pmin (startup power pinning constraint).
-   - **Pre-shutdown hours**: the hour before a shutdown must also be at Pmin.
+---
 
-4. **For each growable slot**, compute the available room: $\text{room} = P_{\max} - P_{\text{current}}$ — and the marginal coal cost to fill it: $\text{coal\_slope} \times \text{room}$.
+#### Phase 2 — Set all derived variables consistently
 
-5. **Distribute headroom proportionally** — compute a single scale factor:
+**Goal**: Now that the ON/OFF schedule is final, fill in every other variable in the model so the warm start is a complete, internally consistent solution.
 
-$$\text{scale} = \min\!\left(\frac{\text{coal\_headroom}}{\sum \text{coal\_slope} \times \text{room}},\; 1.0\right)$$
+The code loops through every hour and every block:
 
-6. **Apply** — each growable slot gets: $P_{b,t} \mathrel{+}= \text{room} \times \text{scale}$.
+**1. Write the on/off values into the Pyomo model:**
 
-For example, if $\text{scale} = 0.6$, every growable hour operates at 60% of its Pmin-to-Pmax range.  This uniform allocation is not optimal — MOSEK will subsequently redistribute coal to the highest-value hours — but it provides a materially better initial objective than flat Pmin dispatch.
+```python
+m.on[b, t].value = on_hint[b][t]    # 0 or 1
+```
 
-#### Phase 2 final — consistency pass
+**2. Compute startup and shutdown flags:**
 
-After P-scaling:
+<pre class="annotated">
+<span class="c1"># Look at the previous hour to detect transitions</span>
+prev_on = on_hint[b][t-1] if t > 0 else INITIAL_ON[b]   <span class="c2"># hour 0 uses config (e.g. Block A=0, B=1)</span>
 
-- **Effective power and running costs**: computed from P, DOW, and cost curves to match the constraint definitions.
-- **P_eff capping**: if P_eff would exceed its variable upper bound, it is capped and P is back-adjusted.
-- **Constraint violation diagnostic**: the heuristic iterates every active constraint in the Pyomo model, evaluates $\text{body} - \text{lb}$ and $\text{ub} - \text{body}$, and reports any violations.  This validates that the warm-start schedule is internally consistent.
+startup  = 1 if (on_val == 1 and prev_on == 0) else 0   <span class="c3"># OFF→ON = startup event</span>
+shutdown = 1 if (on_val == 0 and prev_on == 1) else 0    <span class="c4"># ON→OFF = shutdown event</span>
 
-The completed schedule is then injected into MOSEK (see Section 8).
+m.startup[b, t].value  = startup   <span class="c5"># write into Pyomo variable (e.g. startup[A, 720] = 1)</span>
+m.shutdown[b, t].value = shutdown  <span class="c6"># write into Pyomo variable (e.g. shutdown[B, 500] = 1)</span>
+</pre>
+
+**3. Track how long the block has been off (for tier classification):**
+
+<pre class="annotated">
+if on_val == 0:
+    off_count += 1                   <span class="c1"># block is still off — counter goes up</span>
+else:
+    off_count_at_start = off_count   <span class="c2"># block just turned ON: save how long it was off</span>
+    off_count = 0                    <span class="c3"># reset counter for the next shutdown period</span>
+</pre>
+
+If the block was off from the very beginning (t=0 is OFF), off_count starts at 200 — a sentinel value meaning "very cold" (the block has been cold for well over 100 hours before the planning horizon).
+
+**4. Set start-up tier binaries:**
+
+When a startup occurs (`startup == 1`), the tier depends on `off_count_at_start`:
+
+<pre class="annotated">
+if startup == 1:
+    m.hot_start[b, t].value   = 1 if off_count_at_start < 10              else 0  <span class="c1"># off < 10h → hot (cost: 25 510 EUR)</span>
+    m.cold_start[b, t].value  = 1 if 60 <= off_count_at_start < 100      else 0  <span class="c2"># off 60–100h → cold (cost: 39 910 EUR)</span>
+    m.vcold_start[b, t].value = 1 if off_count_at_start >= 100            else 0  <span class="c3"># off ≥100h → very cold (cost: 60 251 EUR)</span>
+    <span class="c4"># if none: warm start (default tier, cost: 38 291 EUR)</span>
+</pre>
+
+| Off-count | hot_start | cold_start | vcold_start | Tier |
+|-----------|-----------|------------|-------------|------|
+| < 10 h | 1 | 0 | 0 | Hot |
+| 10 – 59 h | 0 | 0 | 0 | Warm (default) |
+| 60 – 99 h | 0 | 1 | 0 | Cold |
+| ≥ 100 h | 0 | 0 | 1 | Very cold |
+
+**5. Set power levels to minimum:**
+
+<pre class="annotated">
+if on_val == 1:
+    both = 1 if (on_hint["A"][t] == 1 and on_hint["B"][t] == 1) else 0
+    P = Pmin[b, t] + 5.0 * both     <span class="c1"># e.g. 155 + 5 = 160 MW (both on) or 155 MW (single)</span>
+else:
+    P = 0                            <span class="c2"># block is OFF — zero output</span>
+m.P[b, t].value = P                 <span class="c3"># write into Pyomo: e.g. P[A, 720] = 160.0</span>
+</pre>
+
+For reference, at these power levels:
+- Block A at 160 MW with DOW: P_eff = 160 + 27 = 187 MW → coal ≈ 180.8 t/h, run_cost ≈ 16 476 EUR/h
+- Block B at 160 MW without DOW: P_eff = 160 MW → coal ≈ 161.2 t/h, run_cost ≈ 14 252 EUR/h
+
+**6. Set detailed ramp variables (when `USE_SIMPLE_STARTUP_RAMP = False`):**
+
+The `in_ramp` binary variable marks which hours fall within a startup ramp window (up to `MAX_RAMP_HOURS` hours after a startup).  The code first clears all `in_ramp` to 0, then for each startup hour, sets `in_ramp = 1` for the next few hours:
+
+<pre class="annotated">
+for t in all_hours:
+    if startup[b, t] == 1:                     <span class="c1"># found a startup at hour t</span>
+        for h in range(MAX_RAMP_HOURS):        <span class="c2"># MAX_RAMP_HOURS = 4 (from Starts tab)</span>
+            if t + h < total_hours:
+                m.in_ramp[b, t + h].value = 1  <span class="c3"># mark hours t, t+1, t+2, t+3 as ramp</span>
+</pre>
+
+Then it sets P during ramp hours to follow the ramp profile from the Starts tab.  **Important**: hour h=0 (the startup hour itself) is **skipped** — it is already pinned to Pmin by the `startup_requires_pmin` constraints (see Section 4.6).  Only hours h=1, h=2, h=3 get ramp profile values:
+
+<pre class="annotated">
+for h in range(MAX_RAMP_HOURS):
+    if h == 0:
+        continue                              <span class="c1"># skip h=0 — Pmin pinning handles it</span>
+    tt = t + h                                <span class="c2"># e.g. if startup at t=720, tt=721,722,723</span>
+    <span class="c3"># Look up the ramp MW for this tier and hour from the Starts tab</span>
+    <span class="c4"># e.g. Block A warm start: h=1→216 MW, h=2→433 MW, h=3→440 MW</span>
+    P_ramp = min(ramp_profile[h] + boost, Pmax - DOW)
+    m.P[b, tt].value = P_ramp                 <span class="c5"># e.g. P[A, 721] = min(216+5, 433.7-27) = 221 MW</span>
+</pre>
+
+**Ramp example — Block A warm start at hour 720 (April 1, 00:00):**
+
+| Hour | h | Ramp profile | + boost | Capped at Pmax−DOW | P set to |
+|------|---|-------------|---------|-------------------|----------|
+| 720 | 0 | (skipped) | — | — | 155 MW (Pmin pinning) |
+| 721 | 1 | 216 MW | 221 MW | 406.7 MW | **221 MW** |
+| 722 | 2 | 433 MW | 438 MW | 406.7 MW | **406.7 MW** (capped) |
+| 723 | 3 | 440 MW | 445 MW | 406.7 MW | **406.7 MW** (capped) |
+
+**7. Set plant-level coupling variables:**
+
+```python
+for t in all_hours:
+    m.both_on[t].value  = 1 if (on_A[t] == 1 and on_B[t] == 1) else 0
+    m.plant_off[t].value = 1 if (on_A[t] == 0 and on_B[t] == 0) else 0
+```
+
+---
+
+#### Phase 2 P-scaling — distribute coal headroom by raising power above Pmin
+
+**Goal**: After Phase 2, every ON-hour runs at minimum output (Pmin + boost).  This is conservative — it uses less coal than the monthly limit allows.  The P-scaling step uses the remaining "coal headroom" to **push power levels upward toward Pmax**, giving MOSEK a better initial objective.
+
+**Why this matters**: If the warm start runs everything at Pmin, the initial objective value is low (e.g. -10M EUR because fuel costs often exceed revenue at minimum load).  MOSEK would have to discover on its own that raising power in high-price hours helps.  By pre-computing a reasonable power distribution, we give MOSEK a warm-start objective that is already close to optimal (e.g. +85M EUR), dramatically reducing search time.
+
+**Step-by-step for each constrained month:**
+
+**1. Compute coal at current power levels:**
+
+<pre class="annotated">
+coal_at_pmin = 0
+for b in ["A", "B"]:
+    for t in month_hours:                          <span class="c1"># e.g. all hours in April</span>
+        if on[b, t] == 1:                          <span class="c2"># only ON-slots burn coal</span>
+            P = m.P[b, t].value                    <span class="c3"># currently at Pmin+boost, e.g. 160 MW</span>
+            P_eff = P + DOW if applicable           <span class="c4"># add DOW: 160+27=187 MW for Block A</span>
+            coal = coal_slope[b, t] * P_eff + coal_fixed[b, t]
+            coal_at_pmin += coal                   <span class="c5"># e.g. 0.902×187+12.1 = 180.8 t/h</span>
+</pre>
+
+**2. Compute headroom:**
+
+<pre class="annotated">
+coal_headroom = limit - coal_at_pmin   <span class="c1"># e.g. 111,000 - 85,000 = 26,000 tonnes</span>
+if coal_headroom <= 0:
+    continue                           <span class="c2"># already at or above limit — can't raise power</span>
+</pre>
+
+**3. Collect "growable" slots — hours where power CAN be increased:**
+
+Not all ON-hours can be increased:
+- **Startup hours** (`startup == 1`): power must stay at Pmin (constraint requirement).
+- **Pre-shutdown hours** (the hour before a `shutdown == 1`): power must also be at Pmin.
+- Detailed ramp hours are handled separately (they follow the ramp profile, not Pmin).
+
+For all other ON-hours, compute the room to grow:
+
+<pre class="annotated">
+grow_slots = []
+for b in ["A", "B"]:
+    for t in month_hours:
+        if on[b, t] != 1:
+            continue                             <span class="c1"># skip OFF-hours</span>
+        if startup[b, t] == 1:
+            continue                             <span class="c2"># startup hour — P must stay at Pmin</span>
+        if t+1 < T_len and shutdown[b, t+1] == 1:
+            continue                             <span class="c3"># hour before shutdown — P must be Pmin</span>
+
+        P_current = m.P[b, t].value              <span class="c4"># e.g. 160 MW (Pmin + 5 boost)</span>
+        P_max_adjusted = Pmax - DOW + boost      <span class="c5"># e.g. 433.7 - 27 + 5 = 411.7 MW</span>
+        room = P_max_adjusted - P_current        <span class="c6"># e.g. 411.7 - 160 = 251.7 MW of upside</span>
+
+        if room > 0:
+            slope = coal_slope[b, t]             <span class="c7"># e.g. 0.902 t/MW</span>
+            grow_slots.append((b, t, room, slope))
+</pre>
+
+**4. Compute a uniform scale factor** that uses all headroom:
+
+<pre class="annotated">
+<span class="c1"># How much coal would ALL growable slots need to reach Pmax?</span>
+total_marginal_coal = sum(room * slope for _, _, room, slope in grow_slots)
+<span class="c2"># What fraction of Pmax can we afford?</span>
+scale = min(coal_headroom / total_marginal_coal, 1.0)  <span class="c3"># e.g. 26,000/71,000 = 0.366</span>
+</pre>
+
+If `scale = 1.0`, there is enough coal to run every growable hour at Pmax.  If `scale = 0.6`, every hour gets 60% of its available room (i.e. runs at 60% between Pmin and Pmax).
+
+**5. Apply the scale factor:**
+
+<pre class="annotated">
+for b, t, room, slope in grow_slots:
+    m.P[b, t].value += room * scale   <span class="c1"># e.g. 160 + 251.7 × 0.366 = 252.1 MW</span>
+</pre>
+
+**Concrete example — April 2026 with real Schkopau parameters:**
+
+| Parameter | Value |
+|-----------|-------|
+| Coal limit (April) | 111 000 tonnes |
+| ON-slots after trimming | 650 (Block A: 325, Block B: 325) |
+| Coal at Pmin (both blocks) | ~85 000 tonnes |
+| Headroom | 111 000 − 85 000 = **26 000 tonnes** |
+| Average room per slot (Block A) | 433.7 − 27 + 5 − 160 = **251.7 MW** |
+| Average room per slot (Block B) | 363.9 − 27 + 5 − 160 = **181.9 MW** |
+| Coal per MW of room (avg) | ~0.92 t/MW |
+| Total marginal coal | 650 spots × ~217 MW avg × 0.92 = **129 800 tonnes** |
+| Scale factor | 26 000 / 129 800 = **0.200** |
+
+Result: each growable hour gets only 20% of its available room:
+- Block A: P = 160 + 251.7 × 0.200 ≈ **210 MW** (out of max 411.7 MW)
+- Block B: P = 160 + 181.9 × 0.200 ≈ **196 MW** (out of max 341.9 MW)
+
+This is conservative — the solver (MOSEK) will subsequently redistribute coal to the highest-price hours, pushing those hours toward Pmax while lowering others.  But even this flat P-scaling produces a warm-start objective that is dramatically better than flat-Pmin dispatch.
+
+---
+
+#### Phase 2 final — consistency pass and constraint violation check
+
+**Goal**: Ensure every variable value in the warm start is internally consistent, and verify that no constraints are violated.
+
+**1. Compute P_eff and running costs:**
+
+For each (block, hour):
+
+<pre class="annotated">
+<span class="c1"># Effective power mirrors the Pyomo P_eff definition exactly</span>
+if USE_DOW_OPPORTUNITY_COSTS:
+    if b == "A":                         <span class="c2"># primary DOW block always carries steam</span>
+        P_eff = P + DOW * on             <span class="c3"># e.g. 210 + 27×1 = 237 MW</span>
+    else:                                <span class="c4"># secondary block only carries DOW when A is off</span>
+        P_eff = P + DOW * (on - both_on) <span class="c5"># if both on: 196 + 27×(1-1) = 196 MW</span>
+else:
+    P_eff = P                            <span class="c6"># DOW-OFF mode: no steam added to P_eff</span>
+
+<span class="c7"># Cap P_eff if it exceeds the variable's upper bound</span>
+if P_eff > P_eff_upper_bound:
+    P_eff = P_eff_upper_bound            <span class="c8"># prevent infeasibility</span>
+    P = P_eff                            <span class="c1"># back-adjust P to match</span>
+
+m.P_eff[b, t].value = P_eff             <span class="c2"># e.g. P_eff[A, 720] = 237.0</span>
+
+<span class="c3"># Running cost = same linear formula as in the objective</span>
+run_cost = cost_slope[b, t] * P_eff + cost_fixed[b, t] * on
+m.run_costs[b, t].value = run_cost       <span class="c4"># e.g. 82.38×237 + 1071×1 = 20,595 EUR/h</span>
+</pre>
+
+**2. Comprehensive constraint violation check:**
+
+This is a full diagnostic loop that checks **every active constraint** in the entire Pyomo model.  The model has ~180 000 individual constraints across ~30 constraint blocks (coal limits, power bounds, min-up, min-down, startup logic, ramp bounds, etc.).  The loop evaluates each one:
+
+<pre class="annotated">
+for each constraint_block in model:                <span class="c1"># e.g. "coal_monthly_limit", "p_lower", "min_up"</span>
+    for each individual constraint in block:        <span class="c2"># e.g. coal_monthly_limit[(2026, 4)]</span>
+        body  = evaluate the left-hand side         <span class="c3"># plug in all current .value's</span>
+        lower = constraint's lower bound (or None)  <span class="c4"># e.g. 0 for "P ≥ 0"</span>
+        upper = constraint's upper bound (or None)  <span class="c5"># e.g. 111000 for coal limit</span>
+
+        violation = 0
+        if lower is not None and body < lower - 0.000001:
+            violation = lower - body                <span class="c6"># how much below the min?</span>
+        if upper is not None and body > upper + 0.000001:
+            violation = max(violation, body - upper) <span class="c7"># how much above the max?</span>
+
+        if violation > 0:
+            count it, record the worst case          <span class="c8"># track for diagnostic report</span>
+</pre>
+
+If any violations are found, the code prints them:
+
+```
+DIAG: 2 constraint blocks violated:
+  startup_ramp_ub: 3 violations (worst=12.4000 at ('A', 1507))
+  min_up: 1 violation (worst=2.0000 at ('B', 4200))
+```
+
+If everything is clean:
+
+```
+DIAG: ALL constraints satisfied
+```
+
+A clean diagnostic means the warm start is a **feasible solution** — the solver can use it directly as its first incumbent.  Minor violations are tolerable (MOSEK's CONSTRUCT_SOL feature will repair them), but large violations suggest a bug in the heuristic.
+
+---
+
+#### Summary: what the warm start produces
+
+After all phases complete, the model contains `.value` entries for every variable:
+
+| Variable | How it's set | Example value (Block A, hour 1500) |
+|----------|-------------|-------------------------------------|
+| `on[A, 1500]` | Phase 1 + coal trimming + cleanup | 1 (ON) |
+| `on[B, 1500]` | Phase 1 + coal trimming + cleanup | 0 (OFF — trimmed for coal) |
+| `startup[A, 1500]` | Phase 2 (transition detection) | 0 (was already on) |
+| `shutdown[B, 1500]` | Phase 2 (transition detection) | 1 (ON→OFF at this hour) |
+| `hot_start[A, ...]` | Phase 2 (off-count based) | 0 |
+| `vcold_start[A, ...]` | Phase 2 (off-count based) | 0 |
+| `P[A, 1500]` | Phase 2 + P-scaling | 210.4 MW (Pmin + scale × room) |
+| `P_eff[A, 1500]` | Consistency pass | 237.4 MW (P + DOW = 210.4 + 27) |
+| `run_costs[A, 1500]` | Consistency pass | 20 624 EUR (82.38 × 237.4 + 1 071) |
+| `both_on[1500]` | Phase 2 | 0 (only Block A is ON) |
+| `plant_off[1500]` | Phase 2 | 0 (Block A is ON) |
+| `in_ramp[A, 1500]` | Phase 2 ramp pass | 0 (not a start-up hour) |
+
+This schedule is then handed to the **MOSEK injection** step (Section 8.1, Step 4), which writes the integer variable values into MOSEK's internal data structure.
 
 ### 5.6  No annual coal limit
 
@@ -447,273 +1023,613 @@ The model does **not** enforce a yearly cap.  Each month is independent — unus
 
 ## 6. Coal Interactions with Other Constraints
 
+Coal is not an isolated constraint — it interacts with nearly every other part of the model.  This section explains those interactions in plain language.
+
 ### 6.1  Coal limit vs. minimum up-time
 
-If prices spike for only 3 hours, a start-up still commits the block for 8 hours (minimum up-time), during which the remaining 5 low-price hours burn coal with marginal or negative returns.  Under a tight coal limit, the solver may forgo the start entirely — the coal consumed during the unprofitable tail hours outweighs the revenue from the price spike.
+Imagine the electricity price spikes to 120 EUR/MWh for 3 hours and then drops back to 40 EUR/MWh.  You might want to start a block just for those 3 profitable hours.  But the **minimum up-time constraint says the block must stay on for at least 8 hours** once started.  That means 3 profitable hours plus 5 hours of mediocre or negative-margin operation.
+
+Each of those 8 hours burns coal — even the unprofitable ones.  Under a tight coal limit, the solver may decide that the coal "wasted" on the 5 tail hours outweighs the profit from the 3-hour spike.  In that case, the block stays off entirely, and the price spike goes unexploited.
+
+**In numbers**: If a block burns ~160 tonnes/hour at Pmin and the 3-hour spike earns an extra €50 000, but the 5 tail hours cost €20 000 in running costs *and* consume 800 tonnes of coal that could have been used elsewhere at a shadow price of €25/tonne (= €20 000 of opportunity cost), the net benefit is only €50 000 – €20 000 – €20 000 = €10 000.  If even that is not enough to justify the start-up cost (~€38 000 for a warm start), the solver skips the start entirely.
 
 ### 6.2  Coal and DOW interaction
 
-The DOW steam load is contractually fixed each hour and must be delivered whenever the plant is operating.  Because coal consumption depends on $P_{\text{eff}}$ (which includes DOW), the steam obligation directly increases monthly coal consumption without contributing to electrical output.  In coal-constrained months, this raises the effective coal cost per MWh of electricity sold.
+The DOW steam obligation is contractually fixed — whenever the plant operates, it must deliver a certain thermal load (the `Warme` column, typically 27 MW-thermal).  This steam is produced by burning additional coal beyond what is needed for electricity alone.
+
+Because coal consumption is computed on $P_{\text{eff}}$ (which includes DOW steam), the steam obligation **directly increases monthly coal usage** without contributing to electrical output.  In practical terms:
+
+- A block at electrical Pmin = 155 MW and DOW = 27 MW has $P_{\text{eff}}$ = 182 MW.
+- Coal consumption is `coal_slope × 182 + coal_fixed`, not `coal_slope × 155 + coal_fixed`.
+- Over a full month with ~700 running hours, this DOW "overhead" can add **15 000–20 000 extra tonnes** of coal consumption.
+
+Under a tight coal limit, this overhead is significant.  It means the plant has fewer tonnes available for marginal production (running above Pmin in high-price hours), which pushes shadow prices upward.
 
 ### 6.3  Single-block vs. dual-block dispatch
 
-With two blocks, the solver has an additional degree of freedom: dispatching only one block halves the hourly coal burn (at the expense of lower production capacity).  Under tight coal constraints, the solver frequently operates one block during shoulder hours and commits the second block only for the highest-price peaks.
+The solver can choose to run **one block or two** in any given hour.  This creates an important trade-off under coal constraints:
 
-### 6.4  Shadow prices on coal
+| Mode | Electricity capacity | Coal burn (approx.) | When chosen |
+|------|---------------------|---------------------|-------------|
+| **Both blocks** | ~800 MW combined | ~320 t/h at Pmin | High-price hours (need volume) |
+| **One block only** | ~400 MW | ~160 t/h at Pmin | Medium-price hours (stretch coal) |
+| **Plant off** | 0 MW | 0 t/h (but OFF costs apply) | Low-price or negative-price hours |
 
-The value of an additional tonne of coal under binding constraints is formalised through shadow prices.
+Under tight coal, the solver frequently dispatches a "one block on, one block off" pattern during shoulder hours (prices that are positive but not high enough to justify the coal burn of two blocks).  The second block is reserved for peak hours where each tonne of coal generates maximum revenue.
+
+The `DUAL_BLOCK_BOOST` parameter (5 MW) also plays a role: when both blocks are on, each gets an extra 5 MW capacity, but they also burn more coal.  The solver accounts for this trade-off.
+
+### 6.4  Coal and start-up costs interaction
+
+Start-up costs do not consume coal directly, but they create coal-consuming commitments.  A warm start costs ~38 000 EUR and commits the block to at least 8 hours of operation (minimum up-time), during which coal is burned at ~160–320 t/h depending on the load level.
+
+Under tight coal:
+- Fewer starts = less coal consumed on unprofitable tail hours = more coal available for high-price hours.
+- The solver reduces the number of starts and prefers longer continuous runs over short bursts.
+
+### 6.5  Shadow prices on coal
+
+The value of an additional tonne of coal under binding constraints is formalised through shadow prices — covered in detail in Section 7.
 
 ---
 
 ## 7. Shadow Prices: Measuring the Value of Scarce Coal
 
-### 7.1  Definition
+### 7.1  What is a shadow price?
 
-The **shadow price** (dual value) of a coal-limit constraint is the marginal increase in optimal profit per additional tonne of coal.  If the optimal profit is €5 000 000 and relaxing the coal limit by one tonne yields €5 000 020, the shadow price is €20/t.
+A **shadow price** answers the question: *"If I could magically add one more tonne of coal to this month's budget, how much more profit would the plant earn?"*
 
-Formally:
+Formally, it is the derivative of the optimal profit with respect to the coal limit:
 
 $$\lambda_{y,m} = \frac{\partial \;\text{Optimal Profit}}{\partial \;\text{Coal Limit}_{y,m}}$$
 
-A high shadow price indicates severe scarcity — the plant is foregoing significant profit due to the coal constraint.  A zero shadow price indicates the constraint is non-binding (the plant has surplus coal).
+**Example**: The solver finds an optimal profit of €5 000 000 for April with a coal limit of 111 000 tonnes.  If we change the limit to 111 001 tonnes (one extra tonne) and re-solve, the profit becomes €5 000 020.  The shadow price is **€20/tonne**.
 
-### 7.2  How the model computes shadow prices
+**What zero means**: If the shadow price is zero, the coal limit is **not binding** — the plant has leftover coal that month.  Adding more coal would change nothing.
 
-Dual values (shadow prices) are only well-defined for **Linear Programmes (LP)** with continuous variables.  Our MILP contains binary on/off decisions where the standard LP duality theory does not directly apply.  The model uses a standard fix-and-relax procedure to work around this:
+**What a high value means**: A shadow price of €60/tonne means the plant is severely constrained.  Every extra tonne of coal would generate €60 of profit by enabling additional high-price-hour generation.
 
-#### Step 1 — Solve the original MILP
+### 7.2  Why the solver can't compute shadow prices directly
 
-MOSEK determines the optimal on/off schedule for all approximately 6 400 hours × 2 blocks.
+Shadow prices (also called "dual values") are a property of **Linear Programmes (LP)** — problems with only continuous variables.  Our model is a **Mixed-Integer Linear Programme (MILP)** because it contains binary on/off decisions.  In a MILP, the concept of "marginal relaxation" is not cleanly defined: you can't be "slightly more on" — a block is either on or off.
 
-#### Step 2 — Fix all integer variables and relax their domains
+The solution is a two-step procedure called **fix-and-relax**:
 
-This step converts the MILP into a pure LP by:
+1. **Solve the MILP** to find the optimal on/off schedule.
+2. **Freeze** all on/off decisions at their optimal values, converting the problem into a pure LP.
+3. **Solve the LP** and read the dual values on the coal constraints.
 
-**A) Fixing** each binary variable at its rounded MIP solution value ($0$ or $1$).  All on/off decisions become frozen constants.
+The LP answers: *"Given that these blocks are on/off in these exact hours (frozen), what are the best power levels, and how sensitive is the profit to the coal limit?"*
 
-**B) Relaxing domains** from `Binary` to `NonNegativeReals`.  This removes the integrality label so the solver treats the problem as a continuous LP and can compute dual values.
+### 7.3  How the code computes shadow prices — step by step
 
-Both operations are required: fixing without relaxation would leave the solver in MIP mode (no duals reported); relaxation without fixing would allow fractional on/off values.  Together, they preserve the exact MIP schedule while enabling LP duality.
+The function `extract_coal_shadow_prices(m)` in `solver.py` performs the following:
 
-The continuous variables ($P_{b,t}$, $P_{\text{eff}}$, run costs) remain free to adjust between their bounds.  The LP then answers: *given this on/off schedule, what are the optimal power levels, and what is the marginal value of relaxing each coal constraint?*
+#### Step 1 — Fix all integer variables to their MILP solution values
 
-#### Step 3 — Attach a dual suffix and re-solve
+The code loops through **every variable** in the entire Pyomo model (~53 000 integer/binary entries like `on[A,0]`, `on[A,1]`, ..., `startup[B,6551]`, `vcold_start[B,6551]`).  For each variable entry, it checks whether it is binary or integer.  If yes:
 
-A Pyomo `Suffix` object (`dual`, direction `IMPORT`) is attached, instructing the solver to return dual values for all constraints.
+<pre class="annotated">
+for each variable v in the model:                  <span class="c1"># e.g. v = on (an IndexedVar with 13,104 entries)</span>
+    for each index idx in v:                       <span class="c2"># e.g. idx = ("A", 1500)</span>
+        vd = v[idx]                                <span class="c3"># one specific entry: on[A, 1500]</span>
+        if vd.is_integer() or vd.is_binary():      <span class="c4"># check THIS entry, not the container</span>
+            original_domain = vd.domain             <span class="c5"># save "Binary" so we can restore later</span>
 
-MOSEK solves the resulting LP — typically in seconds, compared to minutes for the original MILP.
+            if vd is not already fixed:             <span class="c6"># e.g. on[A, 0] might be fixed by initial conditions</span>
+                vd.fix(round(vd.value))             <span class="c7"># lock at 0 or 1 — solver can't change it</span>
+                record (v, idx, original_domain, was_newly_fixed=True)
+            else:
+                record (v, idx, original_domain, was_newly_fixed=False)
 
-#### Step 4 — Read the duals on the coal constraints
+            vd.domain = NonNegativeReals            <span class="c8"># change type: Binary → continuous</span>
+</pre>
 
-For each month $(y, m)$ that has a coal limit constraint:
+**Two things happen simultaneously:**
 
-$$\lambda_{y,m} = \texttt{m.dual[m.coal\_monthly\_limit[ym]]}$$
+- **Fixing** (`vd.fix(...)`) locks the variable at its MILP solution value.  The solver can no longer change it.
+- **Domain relaxation** (`vd.domain = NonNegativeReals`) tells Pyomo the variable is now continuous, not binary.  Without this, MOSEK would still treat the problem as a MILP and refuse to compute duals.
 
-MOSEK returns a positive dual for a binding $\le$ constraint in a maximisation problem.  This value is the shadow price in **EUR per tonne of coal**: the marginal increase in optimal profit per additional tonne of coal.
+**Both** are required.  Fixing without domain relaxation → still MILP, no duals.  Domain relaxation without fixing → the solver could choose fractional on/off values (e.g. 0.73), which is physically meaningless.
 
-For non-binding constraints (coal usage below the limit), the dual is zero — additional coal would have no effect on profit.
+After this loop, the entire model has become a **pure LP** with the same on/off schedule as the MILP solution.
 
-#### Step 5 — Restore model state
+#### Step 2 — Attach a dual suffix
 
-All domains are restored to their original integer/binary type.  Variables that were newly fixed are unfixed.  The `dual` suffix is removed.  The model is returned to its pre-LP state, ready for the merchant re-solve.
+Pyomo does not request dual values from the solver by default.  You must explicitly ask:
+
+```python
+m.dual = Suffix(direction=Suffix.IMPORT)
+```
+
+This tells Pyomo: "When you send this model to the solver, ask the solver to send back dual values (shadow prices) for all constraints."
+
+#### Step 3 — Solve the LP
+
+```python
+lp_solver = SolverFactory("mosek")
+lp_solver.solve(m, tee=False)    # tee=False means don't print solver output
+```
+
+The LP solve is fast — typically a few seconds, compared to 10+ minutes for the original MILP.  The only degrees of freedom left are the continuous variables: power levels ($P_{b,t}$), effective power ($P_{\text{eff}}$), and running costs ($\text{run\_costs}$).  The LP finds the optimal power levels given the frozen on/off schedule.
+
+#### Step 4 — Read the dual values on coal constraints
+
+For each month $(y, m)$ in the coal constraint set:
+
+```python
+for ym in m.coal_months:
+    shadow_price = m.dual.get(m.coal_monthly_limit[ym], 0.0)
+```
+
+MOSEK returns a **positive** dual value for a binding $\le$ constraint in a maximisation problem.  This value is directly in **EUR per tonne of coal**.
+
+#### Step 5 — Clean up and restore
+
+The code carefully restores the model to its pre-LP state:
+
+<pre class="annotated">
+for each recorded variable:
+    v[idx].domain = original_domain    <span class="c1"># restore Binary type (was changed to NonNegativeReals)</span>
+    if was_newly_fixed:
+        v[idx].unfix()                 <span class="c2"># unlock the variable (was locked by .fix())</span>
+
+del m.dual                             <span class="c3"># remove the dual suffix — model is clean again</span>
+</pre>
+
+After cleanup, the model is exactly as it was before — ready for the next operation (merchant shadow prices).
+
+#### Visual summary
 
 ```
-  MILP solve                 ──►   Fix all 53,000 integer vars at MIP values
-  (finds on/off schedule)          + relax domains Binary → NonNegativeReals
+  MILP solve                 ──►   Fix ~53,000 integer vars at MIP values
+  (finds on/off schedule)          + change domain Binary → NonNegativeReals
                                                              │
                                                     Problem is now a pure LP
                                                              │
                                                     Attach dual suffix
-                                                    (= "solver, report duals")
+                                                    (tells solver: "report duals")
                                                              │
-                                                    MOSEK solves LP (fast)
+                                                    MOSEK solves LP (seconds)
                                                              │
-                                                    Read dual on each
-                                                    coal monthly constraint
+                                                    Read dual for each
+                                                    coal_monthly_limit[ym]
                                                              │
-                                                    Shadow price (EUR/t)
+                                              Shadow price in EUR/tonne
+                                                             │
+                                                    Restore all domains,
+                                                    unfix variables, delete suffix
 ```
 
-The shadow price directly informs procurement: if additional spot coal can be acquired for less than the shadow price, the purchase is profitable.
+### 7.4  Full shadow prices vs. merchant-only shadow prices
 
-#### Mechanism of value creation
-
-With the on/off schedule frozen, the LP retains freedom to adjust power levels between $P_{\min}$ and $P_{\max}$.  An additional tonne of coal enables higher output in the most profitable hours while permitting load reduction elsewhere.  The dual value quantifies this flexibility per marginal tonne.
-
-### 7.3  Full shadow prices vs. merchant-only shadow prices
-
-The model computes **two** separate sets of shadow prices.  Understanding the difference requires looking at **what the DOW steam obligation does to the objective and to coal consumption**.
+The model computes **two separate sets** of shadow prices.  This is one of the most important analytical features — it lets you decompose the coal constraint impact into "plant reality" and "pure electricity merchant" components.
 
 #### Full shadow prices (with DOW)
 
-These are computed first.  The LP includes all real-world parameters:
+These are computed first using the procedure described above.  The LP includes all real-world parameters:
 
-- **DOW thermal load** ($\text{DOW}_t$, in MW-thermal): whenever a block is on, it burns coal to produce both electricity *and* steam.  The effective boiler load is $P_{\text{eff}} = P + \text{DOW} \times \text{on}$, and coal consumption depends on $P_{\text{eff}}$, not just $P$.
-- **DOW revenue** ($\text{DOW\_rev}_t$): income from steam delivery, credited whenever at least one block is on.
-- **Grid fee** ($\text{gridfee}_t$): when the entire plant is offline, it draws auxiliary power from the grid at a cost of $(\text{Price} + \text{gridfee}) \times \text{off\_consumption}$.  The grid fee makes shutting down more expensive and therefore influences how tight the coal constraint feels.
-- **DOW off-consumption** (130 MW): when both blocks are off, the DOW consumer switches to electric heating, drawing 130 MW from the grid.  The plant pays for this at $(\text{Price} + \text{gridfee})$ and receives only a partial compensation of 6.9 EUR/MWh.  This large penalty makes it costly to go fully offline.
+- **DOW steam load**: $P_{\text{eff}} = P + \text{DOW} \times \text{on}$, so coal depends on steam too.
+- **DOW revenue**: credited when at least one block is on.
+- **OFF costs**: when the plant is fully offline, house power (10 MW at Price + gridfee) and DOW backup (130 MW at gridfee only, minus 6.9 EUR/MWh compensation) are charged.
 
-The full shadow price thus reflects the **complete economic reality**: DOW revenue makes running more attractive (pulling shadow prices up), DOW coal consumption makes running more coal-hungry (also pulling shadow prices up), and the OFF-cost penalty (including grid fee and DOW backup) makes idling more painful (reducing the plant's willingness to save coal by shutting down, again pushing shadow prices up).
+The full shadow price reflects the **complete economic reality**.
 
 #### Merchant-only shadow prices (without DOW)
 
-These quantify the coal constraint value under a hypothetical pure-merchant scenario (no DOW obligation).  The procedure:
+These answer: *"If the DOW obligation did not exist, how valuable would extra coal be?"*
 
-1. **Saves** all current continuous variable values (so they can be restored later).
-2. **Sets DOW = 0** for every hour — the steam load disappears.  Now $P_{\text{eff}} = P$ (electrical output only).  Each running hour burns **less coal** because the boiler no longer needs to produce steam.
-3. **Sets DOW_rev = 0** for every hour — no steam income.
-4. **Re-fixes all integers** at their MIP solution values (same procedure as before).
-5. **Re-solves the LP** and reads the duals on the coal constraints.
-6. **Restores** DOW, DOW_rev, integer domains, and all continuous variable values to their original state.
+The procedure adds a layer on top of the full-shadow-price calculation:
 
-Note that the **on/off schedule stays the same** between the two solves — only the DOW parameters change.  This isolates the effect of DOW on the coal shadow price.
+**1. Save everything.**  Before modifying any parameters, the code saves the current value of every continuous variable and every DOW-related parameter.  This is crucial because the merchant LP solve will produce different values — we need to restore the originals afterward.
 
-#### Why the two differ
+```python
+# Save continuous variable values
+saved_cont_vals = {}
+for each continuous variable vd:
+    saved_cont_vals[vd] = vd.value
+
+# Save DOW parameters
+saved_dow_rev = {t: DOW_rev[t] for t in all_hours}
+saved_dow     = {t: DOW[t]     for t in all_hours}
+```
+
+**2. Zero out DOW.** Set `DOW[t] = 0` and `DOW_rev[t] = 0` for every hour.  This has two effects:
+- $P_{\text{eff}}$ now equals $P$ (no steam load) → each running hour burns **less coal**.
+- No DOW revenue → revenue comes only from electricity sales.
+
+```python
+for t in all_hours:
+    m.DOW_rev[t] = 0.0
+    m.DOW[t]     = 0.0
+```
+
+**3. Fix-and-relax again.** Same procedure as before: fix all integers, relax domains, attach dual suffix.
+
+**4. Solve the LP and read duals.** The LP now sees a world without DOW: less coal per running hour, no steam income, different OFF costs.
+
+**5. Restore everything.** Integer domains restored, variables unfixed, DOW parameters restored, continuous variable values restored to their pre-merchant values.
+
+```python
+# Restore DOW parameters
+for t in all_hours:
+    m.DOW_rev[t] = saved_dow_rev[t]
+    m.DOW[t]     = saved_dow[t]
+
+# Restore continuous variable values
+for each saved variable:
+    vd.value = saved_value
+```
+
+**Why the careful save/restore?**  The merchant LP solve produces different continuous variable values (because the objective and constraints changed with DOW=0).  If we didn't restore them, subsequent steps (result extraction, audit) would see corrupted values and produce incorrect results.
+
+#### Why the two shadow prices differ
 
 | Factor | Full (with DOW) | Merchant (no DOW) |
 |--------|-----------------|-------------------|
-| Coal burned per running hour | Higher ($P_{\text{eff}}$ includes DOW) | Lower ($P_{\text{eff}} = P$ only) |
-| Revenue per running hour | Electricity + DOW revenue | Electricity only |
-| OFF penalty (grid fee + DOW backup) | High (130 MW DOW backup at Price + gridfee) | Lower (only 10 MW own consumption) |
-| Typical shadow price | **Higher** | **Lower** |
+| Coal per running hour | Higher ($P_{\text{eff}}$ includes 27 MW DOW) | Lower ($P_{\text{eff}} = P$ only) |
+| Revenue per running hour | Electricity + DOW steam | Electricity only |
+| OFF penalty | High (10 MW at Price+gridfee, 130 MW at gridfee, minus compensation) | Lower (10 MW at Price+gridfee + 3 420 EUR/h fixed) |
+| Coal constraint "tightness" | **Tighter** (more coal used per hour) | **Looser** (less coal used per hour) |
+| Shadow price | **Higher** | **Lower** |
 
-The full shadow price is almost always **higher** than the merchant shadow price.  This is because DOW simultaneously:
-- Increases coal consumption per hour (making the coal budget tighter).
-- Increases the penalty for going offline (making it harder to "save coal" by shutting down).
+The full shadow price is almost always **higher** because DOW simultaneously:
+1. **Increases coal usage** per hour (steam load adds to $P_{\text{eff}}$).
+2. **Makes shutting down expensive** (130 MW DOW backup at grid fee).
+3. Both effects make the coal constraint feel tighter → higher marginal value per tonne.
 
-The **difference** between the two shadow prices quantifies the **coal cost of the DOW obligation**.  For example, if the full shadow price is 63 EUR/t and the merchant shadow is 52 EUR/t, the DOW contract imposes 11 EUR/t of additional coal pressure.  This decomposition is essential for DOW contract valuation and renegotiation.
+The **difference** between the two shadow prices is the **coal cost of the DOW obligation**.
 
-#### The role of the grid fee in shadow prices
+**Concrete example:**
 
-The grid fee ($\text{gridfee}_t$) materially influences shadow prices:
+| Month | Full shadow | Merchant shadow | Difference |
+|-------|-------------|-----------------|------------|
+| Apr 2026 | +63.2 EUR/t | +52.0 EUR/t | 11.2 EUR/t |
+| May 2026 | +18.5 EUR/t | +12.3 EUR/t | 6.2 EUR/t |
+| Jun 2026 | 0.0 EUR/t | 0.0 EUR/t | 0.0 (non-binding) |
 
-- When the plant is offline, it pays $(\text{Price}_t + \text{gridfee}_t) \times \text{off\_consumption}$ for auxiliary and DOW backup power.
-- A higher grid fee increases the cost of shutdown, incentivising continued operation even with thin electricity margins.
-- Continued operation consumes coal, tightening the monthly constraint.
-- This pushes shadow prices **upward**.
+In April, the DOW obligation adds €11.2 per tonne of coal pressure.  Over a 111 000 tonne budget, this represents approximately €1.2 million of additional constraint cost attributable to DOW.  This number is directly useful for DOW contract renegotiation.
 
-In the LP re-solve, the grid fee enters the OFF_costs expression directly.  The LP trades off between continued operation (burning coal but avoiding grid fees) and shutdown (saving coal but incurring grid fees).  The shadow price reflects this trade-off at the margin.
+### 7.5  The role of the grid fee in shadow prices
 
-### 7.4  Implementation details — the full procedure
+The grid fee (`Grid fee` column, typically 23.6 EUR/MWh) affects shadow prices through the OFF-cost formula:
 
-The LP re-solve procedure in `extract_coal_shadow_prices` is meticulous about leaving the model in exactly its original state:
+- When offline: house power costs $(P_t + 23.6) \times 10$ EUR per hour (where $P_t$ is the electricity price).
+- In DOW mode: the 130 MW backup costs $23.6 \times 130 = 3\,068$ EUR/hour (at gridfee only) minus $6.9 \times 130 = 897$ EUR/hour compensation.  Net: ~2 171 EUR/hour.
 
-**Phase 1 — Full shadow prices:**
+A higher grid fee increases the cost of being offline → the solver prefers to keep running → more coal is consumed → the coal constraint binds more tightly → shadow prices increase.
 
-1. **Loop** over every variable in the Pyomo model (`m.component_objects(Var)`).
-2. For each variable with an integer or binary domain:
-   - Record the original domain (e.g. `Binary`).
-   - If the variable is **not already fixed** (by initial conditions), fix it at its rounded MIP value and record that it was newly fixed.
-   - If the variable is **already fixed** (e.g. `on[A,0]` was fixed by initial conditions), skip fixing but still record it.
-   - Set the domain to `NonNegativeReals` in all cases.
-3. Attach `m.dual = Suffix(direction=Suffix.IMPORT)`.
-4. Create a fresh MOSEK solver and solve the LP (`tee=False` — no solver output printed).
-5. For each constrained month `ym`:
-   - Read the dual: `m.dual.get(m.coal_monthly_limit[ym], 0.0)`.
-   - Store in `shadow_prices[ym]`.
-6. **Restore**: for each variable, set domain back to original.  Unfix variables that were newly fixed.  Delete `m.dual`.
-7. Print results: `Coal price add-on YYYY-MM: +XX.XX EUR/t (binding)` or `(not binding)`.
+In the LP re-solve, the grid fee enters the OFF_costs expression directly.  The LP trades off between:
+- **Continue running**: burns coal but avoids the grid fee penalty.
+- **Shut down**: saves coal but pays grid fees.
 
-**Phase 2 — Merchant-only shadow prices** (only when `USE_DOW_OPPORTUNITY_COSTS` is enabled):
+The shadow price reflects this trade-off *at the margin*.  Months where the grid fee is high relative to electricity prices will tend to have higher shadow prices, because the "save coal by shutting down" option is more expensive.
 
-1. **Save** the value of every continuous variable (so the merchant LP solve does not corrupt them).
-2. **Save** `DOW_rev[t]` and `DOW[t]` for every hour.
-3. **Zero out** `DOW_rev[t] = 0` and `DOW[t] = 0` for all `t`.  This removes steam revenue from the objective and steam load from $P_{\text{eff}}$, so coal consumption drops.
-4. **Repeat** the integer-fix-and-relax procedure (same as Phase 1).
-5. Attach `m.dual`, solve LP, read duals into `merchant_shadow[ym]`.
-6. **Restore** integer domains and fixes.  Delete `m.dual`.
-7. **Restore** `DOW_rev[t]` and `DOW[t]` to their saved values.
-8. **Restore** all continuous variable values to their pre-merchant-LP values.
-9. Print results: `Merchant shadow YYYY-MM: +XX.XX EUR/t (binding)` or `(not binding)`.
+### 7.6  Illustrative example
 
-Both phases return their results as dictionaries. The function returns a tuple `(shadow_prices, merchant_shadow)` which is then written into the Excel report.
+| Month | Coal limit (kt) | Coal used (kt) | Full shadow (EUR/t) | Merchant shadow (EUR/t) | DOW coal cost (EUR/t) |
+|-------|-----------------|----------------|---------------------|-------------------------|----------------------|
+| Apr   | 111             | 111.0 (binding)| 63.20               | 52.00                   | 11.20 |
+| May   | 129             | 118.4 (slack)  | 0.00                | 0.00                    | 0.00 |
+| Jun   | 130             | 130.0 (binding)| 24.70               | 16.10                   | 8.60 |
 
-### 7.5  Illustrative example
+- **April**: Fully binding.  Very tight budget — every tonne of coal is worth €63 in additional profit.  The DOW obligation accounts for €11/tonne of that tightness.
+- **May**: Non-binding.  Surplus coal remains; shadow price is zero.  Additional coal would not change dispatch.
+- **June**: Binding but less tight than April.  Shadow price €24.70/tonne.
 
-| Month | Coal limit (kt) | Coal used (kt) | Full shadow price (EUR/t) | Merchant shadow (EUR/t) |
-|-------|-----------------|----------------|---------------------|------------------------|
-| Apr   | 90              | 90.0 (binding) | 18.50               | 12.30                  |
-| May   | 95              | 82.4 (slack)   | 0.00                | 0.00                   |
-| Jun   | 85              | 85.0 (binding) | 24.70               | 16.10                  |
+### 7.7  Practical applications
 
-- **April**: Fully binding.  Marginal value of coal is €18.50/t (full), of which €6.20/t is attributable to the DOW obligation.
-- **May**: Non-binding — surplus coal, zero shadow price.
-- **June**: Tightest month.  Marginal coal value reaches €24.70/t.
+Shadow prices directly inform business decisions:
 
-### 7.6  Applications of shadow prices
+1. **Coal procurement**: If spot coal is available at a delivered cost below the shadow price, buying it is NPV-positive.  Example: shadow price = €63/tonne, spot coal available at €55/tonne → buy it, because using it generates €8/tonne of net profit.
 
-Shadow prices support several commercial and operational decisions:
+2. **DOW contract valuation**: The full-minus-merchant difference quantifies the coal cost of the DOW obligation.  This feeds into DOW contract pricing and renegotiation discussions.
 
-- **Coal procurement**: If spot coal is available below the shadow price, the marginal purchase is NPV-positive.
-- **DOW contract valuation**: The full-vs.-merchant differential quantifies the coal cost attributable to the DOW obligation.
-- **Maintenance planning**: Outages should be scheduled in low-shadow-price months where coal is not the binding constraint.
-- **Hedging and forward sales**: Shadow prices inform the effective marginal cost of generation.
+3. **Maintenance scheduling**: Outages should be scheduled in months with **zero or low** shadow prices (non-binding coal months).  Scheduling an outage in a high-shadow-price month wastes the coal that would have been freed by the outage.
+
+4. **Hedging**: Shadow prices inform the effective marginal cost of generation, which matters for forward electricity sales.  If the shadow price is €40/tonne and coal conversion is ~0.95 t/MWh, the coal-scarcity premium on marginal generation is ~€38/MWh.
 
 ---
 
 ## 8. End-to-End Workflow
 
+This section describes the complete processing pipeline from raw input data to the final Excel report.  Each step references the Python module where the code lives.
+
 ### 8.1  Processing pipeline
 
-1. **Data preparation**: Read the Excel input file.  Merge Block A and Block B hourly data.  Compute linearised cost curves and coal curves.  Parse start-up tiers and coal limits.
+#### Step 1 — Data loading (`data_loader.py`)
 
-2. **Warm start**: Before calling the solver, the model constructs an initial feasible schedule:
-   - Default everything to ON (respecting unavailability and initial state).
-   - Enforce min-down in 3 cleanup passes.
-   - If coal limits exist, trim the cheapest-price hours so each month stays within the coal cap (using coal rates that account for DUAL_BLOCK_BOOST and DOW).
-   - Enforce min-up and min-down again in up to 10 cleanup passes.
-   - Set power levels to Pmin (+ boost if both on), then scale P up toward Pmax proportionally within remaining coal headroom.
-   - Compute P_eff and run_costs consistently; run a full constraint violation diagnostic.
+The model reads a single Excel workbook.  The `load_data()` function:
 
-3. **Warm-start injection**: The heuristic schedule is injected into MOSEK using a low-level API mechanism:
-   - The solver's internal `_apply_solver` method is intercepted to gain access to the MOSEK task object.
-   - **Only integer variables** (on/off switches, startup, hot_start, vcold_start) are written into the initial solution vector via `task.putxx()`.  Continuous variables (P, P_eff, run_costs) are left at zero.
-   - This is deliberate: MOSEK's **CONSTRUCT_SOL** feature (enabled via `MSK_IPAR_MIO_CONSTRUCT_SOL = MSK_ON`) takes the injected integer hints and solves an internal LP to find the optimal continuous variable values that go with those on/off decisions.  CONSTRUCT_SOL often finds better P-levels than the heuristic's P-scaling, because it optimises continuously rather than using a uniform scale factor.
-   - After injection, the code verifies the putxx took effect by reading the values back via `task.getxx()` and comparing.
-   - An estimated warm-start objective is computed from MOSEK's cost vector to confirm the injected solution is reasonable.
+1. Opens the Excel file and reads four sheets: `Block_A`, `Block_B`, `Starts`, and `Coal_constrains`.
+2. Merges Block A and Block B data into a single DataFrame where each row is one (block, hour) pair.
+3. Parses the `Starts` sheet into ramp profiles and start-up costs for each tier (hot, warm, very cold).
+4. Parses the `Coal_constrains` sheet into monthly coal limits (converted from kilo-tonnes to tonnes by multiplying by 1 000).
+5. Computes derived columns:
+   - **Linearised cost curves**: `cost_slope` and `cost_fixed` from `TC_Pmax` and `TC_Pmin` (see Section 2.1).
+   - **Linearised coal curves**: `coal_slope` and `coal_fixed` from `Coal conversion factor at Pmax/Pmin`.
+6. Returns the DataFrame plus metadata (cost curve parameters, coal curve parameters, start-up data).
 
-4. **MIP solve**: MOSEK searches for the profit-maximising schedule.  It uses branch-and-bound (an algorithm that systematically tries combinations of on/off decisions).  The solver is given a **10-minute time limit** and a **1% optimality gap tolerance** – it stops when it finds a solution within 1% of the theoretical best, or when time runs out (whichever comes first).  A **MIO_SEED of 7** controls the random exploration path of the branch-and-bound tree for reproducibility.
+#### Step 2 — Model construction (`model_builder.py` → `build_model()`)
 
-5. **Termination check**: The model accepts three termination conditions: `optimal` (proven optimal within gap), `maxTimeLimit` (time expired but a feasible solution exists), and `feasible` (a feasible solution found but not proven optimal).
+The `build_model(df, cost_meta)` function creates a Pyomo `ConcreteModel` with:
 
-6. **Shadow-price LP**: After the MIP, fix all on/off decisions and re-solve as a pure LP to extract dual values on the coal constraints (twice: once with DOW, once without).
+- **Sets**: blocks `B = {A, B}`, hours `T = {0, 1, ..., 6551}`, coal months.
+- **Parameters**: all input data attached as indexed Pyomo Parameters (price, Pmin, Pmax, cost_slope, cost_fixed, coal_slope, coal_fixed, DOW, unavailability, etc.).
+- **Variables**: `on`, `startup`, `shutdown`, `hot_start`, `vcold_start`, `P`, `P_eff`, `run_costs`, `both_on`, `plant_off`, `in_ramp` (see Section 3.1).
+- **Objective**: maximise total profit (see Section 3.3).
+- **Constraints**: all families described in Section 4 (availability, startup logic, min-up, min-down, power bounds, power pinning, tier detection, coupling, ramp profiles, coal limits).
 
-7. **Result extraction**: Read all variable values back into the DataFrame.  Compute detailed PnL columns: electricity revenue, running cost, start-up cost, OFF costs, DOW revenue.
+The model typically contains ~53 000 integer/binary variables (on, startup, shutdown, hot_start, vcold_start, in_ramp for 2 blocks × ~6 500 hours) and ~20 000 continuous variables.
 
-8. **Audit**: A multi-level verification ensures the extracted results match the solver's answer:
-   - **Objective check**: verify that the sum of hourly PnL equals the objective value (`Obj/PnL delta`).
-   - **Component reconciliation**: sum each PnL component (revenue, costs, DOW, OFF) independently and compare to the objective.
-   - **Per-hour audit**: find the 12 worst hours where PnL does not match the component sum.
-   - **Pyomo component audit**: re-evaluate every Pyomo expression from the model and compare against the DataFrame column sums.
+#### Step 3 — Warm-start heuristic (`model_builder.py` → `warm_start_heuristic()`)
 
-9. **Reporting**: Write everything to a multi-sheet Excel workbook:
-   - **Results** sheet – hourly detail with all PnL components, coal consumption, CO₂ emissions, and merchant/DOW splits.
-   - **Monthly** sheet – aggregated plant-level totals.
-   - **Monthly_A / Monthly_B** – per-block monthly summaries.
+Described in full detail in **Section 5.5**.  Sets `.value` on every variable in the model.
+
+#### Step 4 — Staged solve with integer hint transfer (`main.py`)
+
+When `USE_STAGED_RAMP_WARMSTART = True` and the model uses detailed startup ramps (`USE_SIMPLE_STARTUP_RAMP = False`), the pipeline uses a **two-stage solving strategy**:
+
+**Stage 1 — Solve an easier version of the problem:**
+
+<pre class="annotated">
+<span class="c1"># Temporarily switch to simple ramp mode (no ramp-profile constraints)</span>
+cfg.USE_SIMPLE_STARTUP_RAMP = True
+
+m1 = build_model(df, cost_meta)           <span class="c2"># build Pyomo model WITHOUT ramp constraints</span>
+warm_start_heuristic(m1)                   <span class="c3"># fill in initial schedule (Section 5.5)</span>
+solver1 = create_solver()                  <span class="c4"># create MOSEK solver instance</span>
+res1 = solve_model(solver1, m1, tee=True)  <span class="c5"># solve with warm-start injection + CONSTRUCT_SOL</span>
+</pre>
+
+The simple-ramp model is **easier** because it has fewer constraints (no ramp profile bounds) and fewer variables (`in_ramp` is fixed to 0).  It typically converges to a 2–3% gap in under 10 minutes.
+
+After Stage 1, the code **writes a full result file** with the suffix `_unrestricted`:
+
+<pre class="annotated">
+df_stage1 = extract_results(df.copy(), m1, cost_meta)     <span class="c1"># extract schedule into DataFrame</span>
+run_audit(df_stage1, m1)                                    <span class="c2"># verify Obj/PnL match</span>
+write_excel(df_stage1, cost_meta, "output_unrestricted.xlsx") <span class="c3"># write intermediate Excel</span>
+</pre>
+
+This intermediate file is useful even if Stage 2 fails — it gives a valid schedule without ramp constraints.
+
+**Stage 2 — Solve the full problem using Stage 1 as a starting point:**
+
+<pre class="annotated">
+cfg.USE_SIMPLE_STARTUP_RAMP = False        <span class="c1"># restore detailed ramp mode</span>
+
+m = build_model(df, cost_meta)             <span class="c2"># build NEW model WITH ramp constraints</span>
+warm_start_heuristic(m)                     <span class="c3"># fill in heuristic schedule (as baseline)</span>
+_copy_integer_hint(m1, m)                   <span class="c4"># OVERWRITE heuristic with Stage 1's solved values</span>
+solver = create_solver()                    <span class="c5"># fresh MOSEK instance</span>
+results = solve_model(solver, m, tee=True)  <span class="c6"># solve full-ramp model with transferred hints</span>
+</pre>
+
+The key step is `_copy_integer_hint(m1, m)`.  This function:
+
+1. Loops through every variable in the Stage 1 model (`m1`).
+2. For each variable that exists in both models and is binary/integer, copies the solved value.
+3. Only copies to variables that are not fixed (respects initial conditions).
+
+<pre class="annotated">
+def _copy_integer_hint(src, dst):
+    for v_src in src.component_objects(Var):       <span class="c1"># loop: on, startup, shutdown, hot_start, ...</span>
+        v_dst = getattr(dst, v_src.name)            <span class="c2"># find matching variable in Stage 2 model</span>
+        for idx in v_src:                           <span class="c3"># e.g. ("A", 1500), ("B", 3200), ...</span>
+            vd_src = v_src[idx]                     <span class="c4"># one specific entry from Stage 1</span>
+            if vd_src.is_binary() or vd_src.is_integer():
+                                                     <span class="c5"># check THIS entry, not the IndexedVar container</span>
+                value = round(vd_src.value)          <span class="c6"># e.g. 1 (ON) — round in case of float imprecision</span>
+                if not v_dst[idx].fixed:             <span class="c7"># don't overwrite initial-condition locks</span>
+                    v_dst[idx].value = value          <span class="c8"># transfer: e.g. on[A,1500] = 1 in Stage 2</span>
+</pre>
+
+**Why check `is_binary()`/`is_integer()` on each entry, not on the container?**  In Pyomo, an indexed variable like `on[b,t]` is an `IndexedVar`.  You can't call `.is_binary()` on the container — it doesn't have that method.  You must check each individual entry (`VarData`) instead.  This was a bug fix: the original code tried to check the container's `.domain` attribute and crashed.
+
+**Why does this help?** Stage 1's optimal on/off schedule is close to Stage 2's optimal schedule — the ramp constraints mainly affect power levels during startup hours, not the overall pattern of when blocks are on or off.  By giving Stage 2 a proven-good starting schedule, MOSEK can focus on optimising around the ramp constraints rather than re-discovering the basic dispatch pattern.
+
+**Alternative staged strategy** (`USE_STAGED_COAL_WARMSTART`): Instead of simple→detailed ramp, this uses no-coal→with-coal as the staging criterion.  Stage 1 solves without coal constraints (unlimited coal); Stage 2 adds coal limits with transferred hints.  This is currently **disabled by default** because the ramp-based staging performs better in practice.
+
+#### Step 5 — Warm-start injection into MOSEK (`solver.py` → `solve_model()`)
+
+This step bridges the gap between Pyomo (the modelling layer) and MOSEK (the actual solver engine).  The warm-start heuristic (or Stage 1 hints) has set `.value` on every Pyomo variable, but MOSEK doesn't automatically read those values.  We need to **inject** them into MOSEK's internal data structure.
+
+The code uses a technique called **monkey-patching**: it temporarily replaces a method on the solver object to intercept the moment when Pyomo has finished building the MOSEK task (MOSEK's internal model representation) but hasn't started solving yet.
+
+<pre class="annotated">
+def solve_model(solver, model, *, tee=True):
+    original_apply = solver._apply_solver  <span class="c1"># save MOSEK's real solve method</span>
+
+    def _patched_apply():                  <span class="c2"># our replacement function</span>
+        task = solver._solver_model        <span class="c3"># the MOSEK "task" = its internal model</span>
+        numvar = task.getnumvar()           <span class="c4"># total variables: ~73,000 for Schkopau</span>
+</pre>
+
+**Step 5a — Build the solution vector:**
+
+<pre class="annotated">
+        xx = [0.0] * numvar               <span class="c1"># create a 73,000-element zero-filled list</span>
+
+        <span class="c2"># Ask MOSEK which of its variables are integer vs. continuous</span>
+        vartypes = []
+        for j in range(numvar):
+            vartypes.append(task.getvartype(j))  <span class="c3"># returns type_int or type_cont</span>
+</pre>
+
+**Step 5b — Map Pyomo variables to MOSEK variables:**
+
+Pyomo and MOSEK use different variable numbering.  Pyomo has named variables like `on[A, 1500]`, while MOSEK has numbered variables like `x_42873`.  The solver maintains a mapping between them:
+
+<pre class="annotated">
+        for pyomo_var, mosek_var in solver._pyomo_var_to_solver_var_map.items():
+            if pyomo_var.fixed:              <span class="c1"># fixed vars: use locked value (e.g. on[A,0] = 0)</span>
+                v = pyomo_var.value
+            else:                            <span class="c2"># free vars: use heuristic/Stage 1 value</span>
+                v = pyomo_var.value
+
+            if v is not None:
+                idx = mosek_var.index         <span class="c3"># MOSEK variable number (e.g. 42873)</span>
+                <span class="c4"># ONLY set integer variables — leave continuous at 0</span>
+                if vartypes[idx] == mosek.variabletype.type_int:
+                    xx[idx] = float(v)        <span class="c5"># write 0.0 or 1.0 into the solution vector</span>
+</pre>
+
+**Why only integer variables?**  MOSEK has a feature called **CONSTRUCT_SOL** that takes a partial integer solution and solves an internal LP to find the best continuous variable values.  CONSTRUCT_SOL is much better at finding optimal power levels than our P-scaling heuristic, because it optimises properly rather than using a uniform scale factor.  So we give MOSEK the on/off schedule and let it figure out the power levels.
+
+**Step 5c — Inject into MOSEK and enable CONSTRUCT_SOL:**
+
+<pre class="annotated">
+        task.putxx(mosek.soltype.itg, xx)     <span class="c1"># write all 73,000 values into MOSEK's memory</span>
+        task.putintparam(
+            mosek.iparam.mio_construct_sol,
+            mosek.onoffkey.on)                <span class="c2"># tell MOSEK: "use my hints to build an LP solution"</span>
+</pre>
+
+`putxx()` writes the entire solution vector into MOSEK's internal storage for the integer solution type (`soltype.itg`).  `mio_construct_sol = ON` tells MOSEK: "Before starting branch-and-bound, take my integer hint and solve an internal LP to find the best continuous variable values (P levels, run_costs, P_eff) that go with these on/off decisions."
+
+**Step 5d — Verify and estimate:**
+
+<pre class="annotated">
+        <span class="c1"># Read the values back from MOSEK to verify putxx worked</span>
+        xx_back = task.getxx(mosek.soltype.itg)
+        n_diff = sum(1 for j in range(numvar) if abs(xx[j] - xx_back[j]) > 1e-8)
+        print(f"putxx verification: {n_diff} values differ")  <span class="c2"># should be 0</span>
+
+        <span class="c3"># Read MOSEK's cost coefficients to estimate the objective</span>
+        c = [task.getcj(j) for j in range(numvar)]  <span class="c4"># cost per unit of each variable</span>
+        obj_est = sum(c[j] * xx[j] for j in range(numvar)) + task.getcfix()
+        print(f"Warm-start estimated objective: {obj_est:,.0f} EUR")
+        <span class="c5"># Typical output: "Warm-start estimated objective: 85,367,973 EUR"</span>
+</pre>
+
+**Step 5e — Run the actual solve:**
+
+<pre class="annotated">
+        return original_apply()            <span class="c1"># calls MOSEK's real solve method</span>
+
+    solver._apply_solver = _patched_apply  <span class="c2"># replace method with our patched version</span>
+    result = solver.solve(model, tee=tee)  <span class="c3"># this triggers _patched_apply → inject → solve</span>
+    solver._apply_solver = original_apply  <span class="c4"># restore original (even if solve crashed)</span>
+    return result
+</pre>
+
+The `try/finally` block ensures the original method is restored even if the solve crashes.
+
+#### Step 6 — MIP solve (MOSEK)
+
+Once injected, MOSEK runs its **branch-and-bound** algorithm:
+
+1. **Root LP relaxation**: Solve the problem ignoring all integrality constraints.  This gives an upper bound on the best possible profit.
+2. **CONSTRUCT_SOL**: Use the injected integer hints to build a feasible solution (the initial incumbent).  This gives a lower bound.
+3. **Branch-and-bound**: Systematically explore combinations of on/off decisions, pruning branches that can't improve on the incumbent.  At each node, solve an LP relaxation and compare to bounds.
+4. **Termination**: Stop when any of these conditions is met:
+   - The gap between best solution and best bound is ≤ 1% (`MOSEK_MIO_TOL_REL_GAP = 0.01`).
+   - Time exceeds 600 seconds (`MOSEK_MIO_MAX_TIME = 600`).
+   - The solution is proven optimal (gap = 0%).
+
+The `MIO_SEED = 7` parameter controls randomisation in the branch-and-bound exploration, ensuring reproducibility.
+
+**Typical output:**
+
+```
+MOSEK MIP: obj=85,367,973  bound=86,220,145  gap=1.00%  time=542s  nodes=14,823
+```
+
+#### Step 7 — Termination check (`main.py` → `check_termination()`)
+
+The code verifies that MOSEK found a solution:
+
+- **`optimal`**: proven optimal within the gap tolerance.  Proceed.
+- **`maxTimeLimit`**: time expired but a feasible solution exists.  Proceed (the solution may not be optimal but is usable).
+- **`feasible`**: a feasible solution was found but optimality is not proven.  Proceed.
+- **Anything else** (e.g. `infeasible`): raise an error and stop.
+
+#### Step 8 — Shadow-price LP re-solve (`solver.py` → `extract_coal_shadow_prices()`)
+
+Described in full detail in **Section 7.3**.  Produces two dictionaries:
+- `shadow_prices`: full shadow prices (with DOW) for each month.
+- `merchant_shadow`: merchant-only shadow prices (without DOW) for each month.
+
+#### Step 9 — Result extraction and audit (`results.py`)
+
+**Extraction** (`extract_results()`): reads the optimal variable values back from the Pyomo model into the DataFrame.  For each (block, hour):
+
+- `on_A`, `on_B`: ON/OFF status (0 or 1).
+- `P_A`, `P_B`: power output (MW).
+- `startup_A`, `startup_B`: whether a start occurred.
+- `revenue`: `P × Price`.
+- `run_costs`: from the Pyomo variable.
+- `start_cost`: start-up cost based on tier.
+- `OFF_costs`: computed from the OFF-cost formula (see Section 3.3).
+- `DOW_rev`: DOW revenue for this hour.
+- `coal_consumption`: computed from coal curves.
+- `PnL`: revenue − run_costs − start_cost − OFF_costs + DOW_rev.
+
+**Audit** (`run_audit()`): a multi-level verification to ensure the extracted DataFrame matches the solver's answer:
+
+1. **Objective check**: sum all PnL cells and compare to MOSEK's reported objective value.  The delta should be 0.00.
+2. **Component reconciliation**: independently sum each component (total revenue, total running cost, total start-up cost, total OFF costs, total DOW revenue) and verify they add up to the objective.
+3. **Per-hour audit**: identify the 12 worst hours where the hourly PnL does not match the component sum.
+4. **Pyomo component audit**: re-evaluate every Pyomo expression directly from the model (not from the DataFrame) and compare against the extracted columns.  This catches bugs where the extraction formula differs from the objective formula.
+
+A passing audit looks like:
+
+```
+Obj/PnL delta: 0.00 EUR  (Obj=85,367,973.45  PnL=85,367,973.45)
+Pyomo audit: all components match (delta < 0.01)
+```
+
+#### Step 10 — Report generation (`reporting.py` → `write_excel()`)
+
+The final step writes a multi-sheet Excel workbook:
+
+| Sheet | Content |
+|-------|---------|
+| **Results** | One row per (block, hour).  All PnL components, power levels, coal consumption, CO₂ emissions, on/off flags, startup flags, tier indicators. |
+| **Monthly** | Aggregated plant-level totals per month (total revenue, costs, PnL, coal used, starts, hours online). |
+| **Monthly_A** | Per-block monthly summary for Block A. |
+| **Monthly_B** | Per-block monthly summary for Block B. |
+
+Shadow prices are also written into the monthly sheets (both full and merchant values).
 
 ### 8.2  Configuration parameters
 
-| Parameter | Default | Effect |
-|-----------|---------|--------|
-| `USE_COAL_CONSTRAINS` | True | Enable/disable monthly coal caps |
-| `USE_DOW_OPPORTUNITY_COSTS` | True | Include DOW steam in P_eff and DOW revenues/OFF costs (True) or treat as pure merchant (False) |
-| `MOSEK_MIO_TOL_REL_GAP` | 1% | Acceptable gap between best solution and theoretical optimum |
-| `MOSEK_MIO_MAX_TIME` | 600 s | Maximum solver time |
-| `MIO_SEED` | 7 | Random seed for branch-and-bound exploration (reproducibility) |
-| `CONSTRUCT_SOL` | ON | MOSEK constructs an LP solution from integer hints before branching |
-| `MIN_UP` | 8 h | Minimum hours a block must stay on after starting |
-| `MIN_DOWN` | 6 h | Minimum hours a block must stay off after stopping |
-| `INITIAL_ON` | {"A": 0, "B": 1} | Starting state of each block (0 = off, 1 = on) |
-| `OWN_CONSUMPTION` | 10 MW | Auxiliary power drawn when offline |
-| `DOW_OFF_CONSUMPTION` | 130 MW | DOW consumer's electric backup load when plant is offline |
-| `DOW_OPPORTUNITY_REVENUE` | 188 EUR/MW | Revenue rate for DOW steam delivery |
-| `DOW_OFF_COMPENSATION` | 6.9 EUR/MWh | Partial compensation paid to DOW consumer when plant is offline |
-| `DUAL_BLOCK_BOOST` | 5 MW | Extra capacity when both blocks run simultaneously |
-| `START_MARGIN_MIN` | 0 EUR | Additional margin added to every start-up cost |
-| `USE_SIMPLE_STARTUP_RAMP` | True | Simplified startup mode (no detailed tier ramp profiles) |
+All parameters are defined in `schkopau_mtp/config.py`.  Changing a parameter only requires editing this file — no code changes needed.
+
+| Parameter | Default | What it controls |
+|-----------|---------|-----------------|
+| `USE_COAL_CONSTRAINS` | True | Enable/disable monthly coal caps.  Set False for "unlimited coal" scenarios. |
+| `USE_DOW_OPPORTUNITY_COSTS` | True | Include DOW steam in P_eff and DOW revenues/OFF costs (True) vs. treat as pure merchant (False). |
+| `MOSEK_MIO_TOL_REL_GAP` | 0.01 (1%) | Stop when the gap between best solution and theoretical best is ≤ this fraction. Lower = more precise but slower. |
+| `MOSEK_MIO_MAX_TIME` | 600 s | Maximum time for the solver.  The solver stops after this even if the gap is above the tolerance. |
+| `MIO_SEED` | 7 | Random seed for MOSEK's branch-and-bound.  Changing this produces different (but equally valid) search paths. |
+| `CONSTRUCT_SOL` | ON | MOSEK constructs an LP solution from the integer hints before branching.  Almost always should be ON. |
+| `MIN_UP` | 8 h | Minimum consecutive hours a block must stay on after starting. |
+| `MIN_DOWN` | 6 h | Minimum consecutive hours a block must stay off after stopping. |
+| `INITIAL_ON` | {"A": 0, "B": 1} | Which blocks are on (1) or off (0) at the start of the planning horizon. |
+| `OWN_CONSUMPTION` | 10 MW | Auxiliary power the plant draws from the grid when offline. |
+| `DOW_OFF_CONSUMPTION` | 130 MW | The DOW consumer's electric backup load when the plant is fully offline. |
+| `DOW_OPPORTUNITY_REVENUE` | 188 EUR/MW | Revenue rate for DOW steam delivery. |
+| `DOW_OFF_COMPENSATION` | 6.9 EUR/MWh | Partial compensation paid to the DOW consumer for their backup heating costs. |
+| `DUAL_BLOCK_BOOST` | 5 MW | Extra capacity each block gets when both run simultaneously. |
+| `START_MARGIN_MIN` | 0 EUR | Flat amount added to every start-up cost (safety margin for wear-and-tear uncertainty). |
+| `USE_SIMPLE_STARTUP_RAMP` | False | When True, disables detailed ramp constraints (fast fallback mode).  When False, uses the detailed ramp profiles from the Starts tab. |
+| `USE_STAGED_RAMP_WARMSTART` | True | Enables two-stage solve: Stage 1 simple ramp → Stage 2 full ramp with integer hint transfer.  Only active when `USE_SIMPLE_STARTUP_RAMP = False`. |
+| `USE_STAGED_COAL_WARMSTART` | False | Alternative two-stage: Stage 1 without coal → Stage 2 with coal.  Disabled by default. |
+| `OFFLINE_FIXED_PENALTY_NO_DOW` | 3 420 EUR/h | Fixed hourly penalty charged when the plant is offline in DOW-OFF mode (replaces the DOW-related OFF costs). |
+| `DEFAULT_GRIDFEE` | 23.6 EUR/MWh | Grid fee used when the input file does not specify one. |
 
 ### 8.3  Summary
 
-The Schkopau model is a **planning engine**.  It takes thousands of hours of electricity prices, fuel costs, emission costs, and plant capabilities, and determines the most profitable operating schedule while obeying physical and contractual limits.  The most impactful of these limits is the **monthly coal cap**, which forces the plant to be selective about when it runs.  The **shadow prices** computed after the main solve quantify exactly how valuable extra coal would be in each month, enabling smarter procurement, scheduling, and commercial decisions.
+The Schkopau model is a **planning engine**.  It takes thousands of hours of electricity prices, fuel costs, emission costs, and plant capabilities, and determines the most profitable operating schedule while obeying physical and contractual limits.
 
-The model supports two operating modes — **DOW ON** and **DOW OFF** — allowing direct comparison of the plant's value with and without the DOW steam obligation.  A sophisticated warm-start heuristic with coal-aware pruning, P-scaling, and MOSEK's CONSTRUCT_SOL feature ensures the solver starts from a high-quality initial solution, typically finding near-optimal answers within minutes even for horizons spanning thousands of hours.
+The most impactful constraint is the **monthly coal cap**, which forces the plant to be selective about when it runs.  The **shadow prices** (Section 7) quantify how valuable extra coal would be in each month.
+
+The model supports two operating modes — **DOW ON** and **DOW OFF** — allowing direct comparison of the plant's value with and without the DOW steam obligation.
+
+A sophisticated **warm-start heuristic** (Section 5.5) with coal-aware pruning, P-scaling, and MOSEK's CONSTRUCT_SOL feature ensures the solver starts from a high-quality initial solution.
+
+When detailed startup ramps are active, a **two-stage solving strategy** (Section 8.1, Step 4) solves the simple-ramp model first and transfers its integer solution to the full-ramp model.  This produces both an intermediate "unrestricted" result file and the final optimised schedule.
+
+The complete pipeline — from reading the Excel input to writing the multi-sheet result workbook — runs in **15–25 minutes** depending on data set size and coal constraint tightness.

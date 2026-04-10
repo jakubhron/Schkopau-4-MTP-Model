@@ -94,19 +94,23 @@ def build_model(df: pd.DataFrame, cost_meta: dict) -> ConcreteModel:
     # Starts tab data (tiered costs & ramp profiles per block)
     _starts = cost_meta.get("starts", {})
 
-    # Pre-compute per-block tiered costs and ramp profiles (3 tiers)
+    # Pre-compute per-block tiered costs and ramp profiles (5 tiers)
     _hot_cost: dict = {}
     _warm_cost: dict = {}
+    _cold_cost: dict = {}
     _vcold_cost: dict = {}
     _ramp: dict = {}  # {block: {tier_name: [ramp_mw_h1, ...]}}
     for b in cfg.BLOCKS:
         tiers = {t["name"]: t for t in _starts.get(b, [])}
-        _hot_cost[b] = tiers.get("hot", {}).get("cost", 47_510.0)
+        _hot_cost[b] = tiers.get("hot", {}).get("cost", 25_510.0)
         _warm_cost[b] = tiers.get("warm", {}).get("cost", 38_291.0)
+        _cold_cost[b] = tiers.get("cold", {}).get("cost", 39_910.0)
         _vcold_cost[b] = tiers.get("vcold", {}).get("cost", 60_251.0)
         _ramp[b] = {
+            "very_hot": tiers.get("very_hot", {}).get("ramp", [262, 397, 440]),
             "hot": tiers.get("hot", {}).get("ramp", [170, 262, 440]),
-            "warm": tiers.get("warm", {}).get("ramp", [240, 440, 440]),
+            "warm": tiers.get("warm", {}).get("ramp", [216, 433, 440]),
+            "cold": tiers.get("cold", {}).get("ramp", [203, 235, 440]),
             "vcold": tiers.get("vcold", {}).get("ramp", [30, 180, 397, 440]),
         }
 
@@ -130,8 +134,9 @@ def build_model(df: pd.DataFrame, cost_meta: dict) -> ConcreteModel:
     m.plant_off = Var(m.T, bounds=(0, 1))   # 1 iff both blocks offline
 
     # Tiered startup variables (indexed by B × T)
-    m.hot_start = Var(m.B, m.T, within=Binary)       # 1 if startup after <10h
-    m.vcold_start = Var(m.B, m.T, within=Binary)     # 1 if startup after ≥60h
+    m.hot_start = Var(m.B, m.T, within=Binary)       # 1 if startup after 5–10h off
+    m.cold_start = Var(m.B, m.T, within=Binary)      # 1 if startup after 60–100h off
+    m.vcold_start = Var(m.B, m.T, within=Binary)     # 1 if startup after ≥100h off
     m.in_ramp = Var(m.B, m.T, bounds=(0, 1))         # 1 during startup ramp hours
 
     # Optional simplified startup mode: no detailed tier ramp profiles.
@@ -209,7 +214,7 @@ def build_model(df: pd.DataFrame, cost_meta: dict) -> ConcreteModel:
     # --------------------------------------------------------
     #  Objective
     # --------------------------------------------------------
-    _add_objective(m, _hot_cost, _warm_cost, _vcold_cost)
+    _add_objective(m, _hot_cost, _warm_cost, _cold_cost, _vcold_cost)
 
     return m
 
@@ -425,9 +430,11 @@ def warm_start_heuristic(m) -> None:
             # tier binaries
             if su == 1:
                 m.hot_start[b, t].value = 1 if off_count_at_start < 10 else 0
-                m.vcold_start[b, t].value = 1 if off_count_at_start >= 60 else 0
+                m.cold_start[b, t].value = 1 if 60 <= off_count_at_start < 100 else 0
+                m.vcold_start[b, t].value = 1 if off_count_at_start >= 100 else 0
             else:
                 m.hot_start[b, t].value = 0
+                m.cold_start[b, t].value = 0
                 m.vcold_start[b, t].value = 0
 
             # P — use Pmin (+ boost if both on) so constraints are satisfied.
@@ -461,11 +468,14 @@ def warm_start_heuristic(m) -> None:
                 if su == 1:
                     # Determine tier
                     hot = round(m.hot_start[b, t].value or 0)
+                    cold = round(m.cold_start[b, t].value or 0)
                     vcold = round(m.vcold_start[b, t].value or 0)
                     if hot:
                         tier = "hot"
                     elif vcold:
                         tier = "vcold"
+                    elif cold:
+                        tier = "cold"
                     else:
                         tier = "warm"
                     ramp_profile = _ramp_data.get(b, {}).get(tier, [])
@@ -473,6 +483,10 @@ def warm_start_heuristic(m) -> None:
                         tt = t + h
                         if tt >= T_len:
                             break
+                        # Startup hour is pinned to Pmin by startup_requires_pmin_*;
+                        # skip heuristic ramp overwrite to avoid hint conflicts.
+                        if h == 0:
+                            continue
                         if h < len(ramp_profile):
                             both = 1 if all(on_hint[bb][tt] == 1 for bb in B_list) else 0
                             pmax_tt = float(value(m.Pmax[b, tt]))
@@ -757,22 +771,36 @@ def _add_startup_shutdown_constraints(m, T_len: int) -> None:
 def _add_off_hours_and_tier_constraints(m, T_len: int) -> None:
     """Lookback-based tier classification (no off_hours variable, no Big-M).
 
-    Uses the fact that MIN_UP >= 8 and MIN_DOWN >= 6 to classify tiers
-    via direct lookback on on[b, t-k] variables:
-      - hot  (off < 10h):  on[b, t-10] = 1  ↔  hot start
-      - vcold (off ≥ 60h): use checkpoints spaced MIN_UP apart to detect
-                             any on-period in the last 60 hours
-    """
-    # Vcold checkpoints: spaced by MIN_UP so any on-period ≥ MIN_UP hours
-    # is guaranteed to include at least one checkpoint.
-    _vc_checks = list(range(cfg.MIN_UP, 61, cfg.MIN_UP))  # [8, 16, 24, 32, 40, 48, 56]
-    _n_vc = len(_vc_checks)
+    Tier boundaries from the Starts tab:
+      - hot   (5–10h off):  on[b, t-10] = 1  ↔  hot start
+      - warm  (10–60h off): default (neither hot nor cold nor vcold)
+      - cold  (60–100h off): no warm-zone checkpoint = 1, but some cold-zone = 1
+      - vcold (≥100h off):  all checkpoints up to 100h = 0
 
-    # --- Tier hierarchy ---
+    Note: very_hot (0–5h off) is structurally impossible with MIN_DOWN=6h.
+    """
+    # Warm-zone checkpoints: spaced by MIN_UP, covering 0–60h
+    _warm_checks = list(range(cfg.MIN_UP, 61, cfg.MIN_UP))  # [8, 16, 24, 32, 40, 48, 56]
+    _n_warm = len(_warm_checks)
+
+    # Cold-zone checkpoints: covering 60–100h
+    _cold_checks = list(range(64, 101, cfg.MIN_UP))  # [64, 72, 80, 88, 96]
+    _n_cold = len(_cold_checks)
+
+    # All checkpoints up to 100h (warm + cold zones)
+    _all_checks = _warm_checks + _cold_checks
+    _n_all = len(_all_checks)
+
+    # --- Tier hierarchy (each ≤ startup) ---
     def hot_le_startup(m, b, t):
         return m.hot_start[b, t] <= m.startup[b, t]
 
     m.hot_le_startup = Constraint(m.B, m.T, rule=hot_le_startup)
+
+    def cold_le_startup(m, b, t):
+        return m.cold_start[b, t] <= m.startup[b, t]
+
+    m.cold_le_startup = Constraint(m.B, m.T, rule=cold_le_startup)
 
     def vcold_le_startup(m, b, t):
         return m.vcold_start[b, t] <= m.startup[b, t]
@@ -780,7 +808,7 @@ def _add_off_hours_and_tier_constraints(m, T_len: int) -> None:
     m.vcold_le_startup = Constraint(m.B, m.T, rule=vcold_le_startup)
 
     def tier_exclusivity(m, b, t):
-        return m.hot_start[b, t] + m.vcold_start[b, t] <= m.startup[b, t]
+        return m.hot_start[b, t] + m.cold_start[b, t] + m.vcold_start[b, t] <= m.startup[b, t]
 
     m.tier_exclusivity = Constraint(m.B, m.T, rule=tier_exclusivity)
 
@@ -793,23 +821,48 @@ def _add_off_hours_and_tier_constraints(m, T_len: int) -> None:
     m.prevent_hot = Constraint(m.B, m.T, rule=prevent_hot)
 
     def force_hot(m, b, t):
-        """Force hot when startup, on[t-10]=1, and not vcold."""
+        """Force hot when startup, on[t-10]=1, and not cold/vcold."""
         k = max(0, t - 10)
-        return m.hot_start[b, t] >= m.startup[b, t] + m.on[b, k] - 1 - m.vcold_start[b, t]
+        return m.hot_start[b, t] >= m.startup[b, t] + m.on[b, k] - 1 - m.cold_start[b, t] - m.vcold_start[b, t]
 
     m.force_hot = Constraint(m.B, m.T, rule=force_hot)
 
-    # --- Vcold detection via checkpoints ---
+    # --- Cold detection: no warm-zone checkpoint=1, but some cold-zone=1 ---
+    def prevent_cold_warm(m, b, t):
+        """Prevent cold if any warm-zone checkpoint shows block was on recently."""
+        lookbacks = [m.on[b, max(0, t - k)] for k in _warm_checks]
+        return _n_warm * m.cold_start[b, t] + sum(lookbacks) <= _n_warm
+
+    m.prevent_cold_warm = Constraint(m.B, m.T, rule=prevent_cold_warm)
+
+    def prevent_cold_vcold(m, b, t):
+        """Prevent cold if no cold-zone checkpoint shows block was recently on."""
+        lookbacks = [m.on[b, max(0, t - k)] for k in _cold_checks]
+        return _n_cold * m.cold_start[b, t] <= sum(lookbacks)
+
+    m.prevent_cold_vcold = Constraint(m.B, m.T, rule=prevent_cold_vcold)
+
+    # Force cold: for each cold-zone checkpoint, if it fires and no warm fires → cold
+    m.force_cold = ConstraintList()
+    for b in m.B:
+        for t in m.T:
+            warm_lbs = [m.on[b, max(0, t - k)] for k in _warm_checks]
+            for k in _cold_checks:
+                m.force_cold.add(
+                    m.cold_start[b, t] >= m.startup[b, t] + m.on[b, max(0, t - k)] - sum(warm_lbs) - 1
+                )
+
+    # --- Vcold detection: all checkpoints up to 100h = 0 ---
     def prevent_vcold(m, b, t):
         """Prevent vcold if any checkpoint shows block was on recently."""
-        lookbacks = [m.on[b, max(0, t - k)] for k in _vc_checks]
-        return _n_vc * m.vcold_start[b, t] + sum(lookbacks) <= _n_vc
+        lookbacks = [m.on[b, max(0, t - k)] for k in _all_checks]
+        return _n_all * m.vcold_start[b, t] + sum(lookbacks) <= _n_all
 
     m.prevent_vcold = Constraint(m.B, m.T, rule=prevent_vcold)
 
     def force_vcold(m, b, t):
-        """Force vcold when startup and all checkpoints show off."""
-        lookbacks = [m.on[b, max(0, t - k)] for k in _vc_checks]
+        """Force vcold when startup and all checkpoints up to 100h show off."""
+        lookbacks = [m.on[b, max(0, t - k)] for k in _all_checks]
         return m.vcold_start[b, t] >= m.startup[b, t] - sum(lookbacks)
 
     m.force_vcold = Constraint(m.B, m.T, rule=force_vcold)
@@ -849,6 +902,7 @@ def _add_startup_ramp_constraints(m, T_len: int, ramp_data: dict) -> None:
     for b in m.B:
         hot_ramp = ramp_data[b]["hot"]
         warm_ramp = ramp_data[b]["warm"]
+        cold_ramp = ramp_data[b]["cold"]
         vcold_ramp = ramp_data[b]["vcold"]
 
         for t in m.T:
@@ -859,6 +913,10 @@ def _add_startup_ramp_constraints(m, T_len: int, ramp_data: dict) -> None:
             pmax_dow = pmax_bt - float(value(m.DOW[t]))
 
             for h in range(_H):
+                # Startup hour is pinned by startup_requires_pmin_* constraints;
+                # ramp envelopes start from h=1 to avoid contradictory bounds.
+                if h == 0:
+                    continue
                 s = t - h  # startup time
                 if s < 0:
                     continue
@@ -874,6 +932,11 @@ def _add_startup_ramp_constraints(m, T_len: int, ramp_data: dict) -> None:
                         m.P[b, t] <= warm_ramp[h] + _boost * m.both_on[t]
                         + cfg.BIG_M * (1 - m.startup[b, s])
                     )
+                if h < len(cold_ramp):
+                    cl_ramp.add(
+                        m.P[b, t] <= cold_ramp[h] + _boost * m.both_on[t]
+                        + cfg.BIG_M * (1 - m.cold_start[b, s])
+                    )
                 if h < len(vcold_ramp):
                     cl_ramp.add(
                         m.P[b, t] <= vcold_ramp[h] + _boost * m.both_on[t]
@@ -888,14 +951,22 @@ def _add_startup_ramp_constraints(m, T_len: int, ramp_data: dict) -> None:
                         m.P[b, t] >= lb_h
                         - cfg.BIG_M * (1 - m.hot_start[b, s])
                     )
-                # Warm LB: active when startup=1 AND not hot/vcold
+                # Warm LB: active when startup=1 AND not hot/cold/vcold
                 if h < len(warm_ramp):
                     lb_w = min(warm_ramp[h], pmax_dow)
                     cl_ramp_lb2.add(
                         m.P[b, t] >= lb_w
                         - cfg.BIG_M * (1 - m.startup[b, s]
                                        + m.hot_start[b, s]
+                                       + m.cold_start[b, s]
                                        + m.vcold_start[b, s])
+                    )
+                # Cold LB: active when cold_start=1
+                if h < len(cold_ramp):
+                    lb_c = min(cold_ramp[h], pmax_dow)
+                    cl_ramp_lb2.add(
+                        m.P[b, t] >= lb_c
+                        - cfg.BIG_M * (1 - m.cold_start[b, s])
                     )
                 # Vcold LB: active when vcold_start=1
                 if h < len(vcold_ramp):
@@ -977,9 +1048,10 @@ def _add_shutdown_ramp_constraints(m) -> None:
 # ----------------------------------------------------------------
 
 
-def _add_objective(m, hot_cost, warm_cost, vcold_cost) -> None:
+def _add_objective(m, hot_cost, warm_cost, cold_cost, vcold_cost) -> None:
     # Pre-compute incremental costs per block (warm is baseline)
     _hot_delta = {b: hot_cost[b] - warm_cost[b] for b in cfg.BLOCKS}
+    _cold_delta = {b: cold_cost[b] - warm_cost[b] for b in cfg.BLOCKS}
     _vcold_delta = {b: vcold_cost[b] - warm_cost[b] for b in cfg.BLOCKS}
 
     def obj(m):
@@ -995,6 +1067,7 @@ def _add_objective(m, hot_cost, warm_cost, vcold_cost) -> None:
                 start_cost = (
                     (warm_cost[b] + cfg.START_MARGIN_MIN) * m.startup[b, t]
                     + _hot_delta[b] * m.hot_start[b, t]
+                    + _cold_delta[b] * m.cold_start[b, t]
                     + _vcold_delta[b] * m.vcold_start[b, t]
                 )
 
@@ -1004,15 +1077,16 @@ def _add_objective(m, hot_cost, warm_cost, vcold_cost) -> None:
                     - start_cost
                 )
 
-            # OFF_costs: grid fee only when BOTH blocks offline
-            off_consumption = cfg.OWN_CONSUMPTION
-            if cfg.USE_DOW_OPPORTUNITY_COSTS:
-                off_consumption += cfg.DOW_OFF_CONSUMPTION
-            OFF_costs = m.plant_off[t] * off_consumption * (
+            # OFF_costs when BOTH blocks offline.
+            # In DOW mode, 130 MW is charged only on grid fee (not market price).
+            OFF_costs = m.plant_off[t] * cfg.OWN_CONSUMPTION * (
                 m.price[t] + m.gridfee[t]
             )
             if cfg.USE_DOW_OPPORTUNITY_COSTS:
+                OFF_costs += m.plant_off[t] * cfg.DOW_OFF_CONSUMPTION * m.gridfee[t]
                 OFF_costs -= m.plant_off[t] * cfg.DOW_OFF_CONSUMPTION * cfg.DOW_OFF_COMPENSATION
+            else:
+                OFF_costs += m.plant_off[t] * cfg.OFFLINE_FIXED_PENALTY_NO_DOW
             expr -= OFF_costs
 
             # DOW revenue attributed once per hour (plant-level)

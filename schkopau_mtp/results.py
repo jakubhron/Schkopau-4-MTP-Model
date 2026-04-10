@@ -211,15 +211,15 @@ def _compute_pnl(df: pd.DataFrame, cost_meta: dict) -> pd.DataFrame:
     df["start_cost"] = total_start_cost
     df["profit_spot"] = total_profit_spot
 
-    # OFF_costs: grid fee only when BOTH blocks offline
+    # OFF_costs when BOTH blocks offline
     _any_on = sum(df[f"on_model_{b}"] for b in cfg.BLOCKS)
     plant_off = (_any_on == 0).astype(int)
-    off_consumption = cfg.OWN_CONSUMPTION
+    df["OFF_costs"] = plant_off * cfg.OWN_CONSUMPTION * (df["Price"] + df["GRIDFEE"])
     if cfg.USE_DOW_OPPORTUNITY_COSTS:
-        off_consumption += cfg.DOW_OFF_CONSUMPTION
-    df["OFF_costs"] = plant_off * off_consumption * (df["Price"] + df["GRIDFEE"])
-    if cfg.USE_DOW_OPPORTUNITY_COSTS:
+        df["OFF_costs"] += plant_off * cfg.DOW_OFF_CONSUMPTION * df["GRIDFEE"]
         df["OFF_costs"] -= plant_off * cfg.DOW_OFF_CONSUMPTION * cfg.DOW_OFF_COMPENSATION
+    else:
+        df["OFF_costs"] += plant_off * cfg.OFFLINE_FIXED_PENALTY_NO_DOW
 
     df["P_eff"] = sum(df[f"P_eff_{b}"] for b in cfg.BLOCKS)
 
@@ -384,15 +384,15 @@ def _print_pyomo_component_audit(df, m, obj_val_global, cost_meta=None):
             py_run_costs += run_costs
             py_start += start_cost
 
-        # OFF_costs: grid fee only when both blocks offline
-        off_consumption = cfg.OWN_CONSUMPTION
-        if cfg.USE_DOW_OPPORTUNITY_COSTS:
-            off_consumption += cfg.DOW_OFF_CONSUMPTION
-        py_off_costs += _v(m.plant_off[t]) * off_consumption * (
+        # OFF_costs when both blocks offline
+        py_off_costs += _v(m.plant_off[t]) * cfg.OWN_CONSUMPTION * (
             _v(m.price[t]) + _v(m.gridfee[t])
         )
         if cfg.USE_DOW_OPPORTUNITY_COSTS:
+            py_off_costs += _v(m.plant_off[t]) * cfg.DOW_OFF_CONSUMPTION * _v(m.gridfee[t])
             py_off_costs -= _v(m.plant_off[t]) * cfg.DOW_OFF_CONSUMPTION * cfg.DOW_OFF_COMPENSATION
+        else:
+            py_off_costs += _v(m.plant_off[t]) * cfg.OFFLINE_FIXED_PENALTY_NO_DOW
 
         # DOW (plant-level, dispatch-based)
         _other_py = [b for b in cfg.BLOCKS if b != cfg.DOW_BLOCK][0]

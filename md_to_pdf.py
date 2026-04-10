@@ -166,6 +166,29 @@ html_doc = f"""\
         color: #003366;
     }}
 
+    /* Colored code annotations — each .c1–.c8 class gives
+       a distinct comment colour so readers can match
+       annotations to specific lines at a glance. */
+    pre.annotated {{
+        background-color: #f8f9fa;
+        padding: 14px 18px;
+        border-radius: 4px;
+        border-left: 3px solid #003366;
+        overflow-x: auto;
+        font-size: 9.5pt;
+        line-height: 1.55;
+        font-family: Consolas, 'Courier New', monospace;
+        page-break-inside: avoid;
+    }}
+    .c1 {{ color: #2563eb; font-style: italic; }}   /* blue    */
+    .c2 {{ color: #059669; font-style: italic; }}   /* green   */
+    .c3 {{ color: #d97706; font-style: italic; }}   /* amber   */
+    .c4 {{ color: #7c3aed; font-style: italic; }}   /* purple  */
+    .c5 {{ color: #dc2626; font-style: italic; }}   /* red     */
+    .c6 {{ color: #0891b2; font-style: italic; }}   /* cyan    */
+    .c7 {{ color: #be185d; font-style: italic; }}   /* pink    */
+    .c8 {{ color: #4338ca; font-style: italic; }}   /* indigo  */
+
     /* Print tweaks */
     @media print {{
         body {{

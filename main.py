@@ -19,7 +19,7 @@ import os
 import sys
 
 import mosek
-from pyomo.environ import value
+from pyomo.environ import Var, value
 
 from schkopau_mtp import config as cfg
 from schkopau_mtp.data_loader import load_and_prepare
@@ -34,6 +34,36 @@ from schkopau_mtp.solver import (
     solve_model,
     try_load_cache,
 )
+
+
+def _append_output_suffix(path: str, suffix: str) -> str:
+    """Return path with an extra suffix inserted before extension."""
+    root, ext = os.path.splitext(path)
+    return f"{root}_{suffix}{ext}"
+
+
+def _copy_integer_hint(src, dst) -> None:
+    """Copy integer/binary variable values from one model instance to another."""
+    for v_src in src.component_objects(Var, active=True):
+        if not hasattr(dst, v_src.name):
+            continue
+        v_dst = getattr(dst, v_src.name)
+        for idx in v_src:
+            if idx not in v_dst:
+                continue
+            vd_src = v_src[idx]
+            is_integer_like = bool(
+                getattr(vd_src, "is_binary", lambda: False)()
+                or getattr(vd_src, "is_integer", lambda: False)()
+            )
+            if not is_integer_like:
+                continue
+
+            vv = vd_src.value
+            if vv is None:
+                continue
+            if not v_dst[idx].fixed:
+                v_dst[idx].value = round(float(vv))
 
 
 def main() -> None:
@@ -70,10 +100,79 @@ def main() -> None:
     results = None
 
     if not skip_solve:
-        m = build_model(df, cost_meta)
-        warm_start_heuristic(m)
-        solver = create_solver()
-        results = solve_model(solver, m, tee=True)
+        # Preferred staged flow: first solve with simple startup ramp,
+        # then solve the full-ramp model using transferred integer hints.
+        if cfg.USE_STAGED_RAMP_WARMSTART and not cfg.USE_SIMPLE_STARTUP_RAMP:
+            print("--- Staged solve: Stage 1 (SIMPLE startup ramp)")
+            _orig_simple = cfg.USE_SIMPLE_STARTUP_RAMP
+            cfg.USE_SIMPLE_STARTUP_RAMP = True
+
+            m1 = build_model(df, cost_meta)
+            warm_start_heuristic(m1)
+            solver1 = create_solver()
+            res1 = solve_model(solver1, m1, tee=True)
+            check_termination(res1, skip_solve=False)
+
+            print("--- Stage 1 complete, writing unrestricted Stage 1 result file")
+            df_stage1 = extract_results(df.copy(), m1, cost_meta, skip_solve=False, cached_meta=None)
+            run_audit(df_stage1, m1, skip_solve=False, cached_meta=None, cost_meta=cost_meta)
+            stage1_output = _append_output_suffix(cfg.OUTPUT_FILE, "unrestricted")
+            write_excel(
+                df_stage1,
+                cost_meta,
+                stage1_output,
+                coal_shadow_prices={},
+                merchant_shadow_prices={},
+            )
+            print(f"--- Stage 1 file saved: {stage1_output}")
+
+            print("--- Staged solve: Stage 2 (FULL startup ramp) with integer hint transfer")
+            cfg.USE_SIMPLE_STARTUP_RAMP = _orig_simple
+
+            m = build_model(df, cost_meta)
+            warm_start_heuristic(m)
+            _copy_integer_hint(m1, m)
+            solver = create_solver()
+            results = solve_model(solver, m, tee=True)
+
+        # Secondary staged flow: no-coal first solve, then coal-constrained.
+        elif cfg.USE_STAGED_COAL_WARMSTART and cfg.USE_COAL_CONSTRAINS:
+            print("--- Staged solve: Stage 1 (without coal constraints)")
+            _orig_coal = cfg.USE_COAL_CONSTRAINS
+            cfg.USE_COAL_CONSTRAINS = False
+
+            m1 = build_model(df, cost_meta)
+            warm_start_heuristic(m1)
+            solver1 = create_solver()
+            res1 = solve_model(solver1, m1, tee=True)
+            check_termination(res1, skip_solve=False)
+
+            print("--- Stage 1 complete, writing unrestricted Stage 1 result file")
+            df_stage1 = extract_results(df.copy(), m1, cost_meta, skip_solve=False, cached_meta=None)
+            run_audit(df_stage1, m1, skip_solve=False, cached_meta=None, cost_meta=cost_meta)
+            stage1_output = _append_output_suffix(cfg.OUTPUT_FILE, "unrestricted")
+            write_excel(
+                df_stage1,
+                cost_meta,
+                stage1_output,
+                coal_shadow_prices={},
+                merchant_shadow_prices={},
+            )
+            print(f"--- Stage 1 file saved: {stage1_output}")
+
+            print("--- Staged solve: Stage 2 (with coal constraints) using integer hint transfer")
+            cfg.USE_COAL_CONSTRAINS = _orig_coal
+
+            m = build_model(df, cost_meta)
+            warm_start_heuristic(m)
+            _copy_integer_hint(m1, m)
+            solver = create_solver()
+            results = solve_model(solver, m, tee=True)
+        else:
+            m = build_model(df, cost_meta)
+            warm_start_heuristic(m)
+            solver = create_solver()
+            results = solve_model(solver, m, tee=True)
 
     term = check_termination(results, skip_solve)
 

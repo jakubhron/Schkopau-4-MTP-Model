@@ -74,7 +74,7 @@ SKIP_SOLVE_AND_EXTRACT = False
 #                   SOLVER SETTINGS
 # ============================================================
 USE_MOSEK = True
-MOSEK_MIO_TOL_REL_GAP = "0.01"    # 1 % MIP gap
+MOSEK_MIO_TOL_REL_GAP = "0.03"    # 1 % MIP gap
 MOSEK_MIO_MAX_TIME = "600"         # max 10 minutes
 
 # ============================================================
@@ -90,22 +90,26 @@ MIN_DOWN = 6            # min-down time [h]
 START_MARGIN_MIN = 0         # minimum margin hurdle / start [EUR]
 INITIAL_ON = {"A": 0, "B": 1}  # initial unit commitment state per block
 MAX_RAMP_HOURS = 4       # maximum startup ramp duration [h]
-USE_SIMPLE_STARTUP_RAMP = True # if True: startup dispatch uses only Pmin/Pmax bounds (no tier ramp profiles)
+USE_SIMPLE_STARTUP_RAMP = False # detailed startup ramp mode (simple mode used in staged Stage 1 only)
+USE_STAGED_COAL_WARMSTART = False  # legacy staged approach (no coal first), keep disabled by default
+USE_STAGED_RAMP_WARMSTART = True   # Stage 1 simple ramp, Stage 2 full ramp with integer hint transfer
 
 # ============================================================
 #                   ECONOMIC PARAMETERS
 # ============================================================
 OWN_CONSUMPTION = 10.0   # house power [MW]
-DEFAULT_GRIDFEE = 0   # fallback grid fee [EUR/MWh]
+DEFAULT_GRIDFEE = 23.6   # fallback grid fee [EUR/MWh]
+OFFLINE_FIXED_PENALTY_NO_DOW = 3420.0  # [EUR/h] fixed plant-off penalty when USE_DOW_OPPORTUNITY_COSTS=False
 
 # ============================================================
 #                   DOW OPPORTUNITY COSTS
 # ============================================================
-USE_DOW_OPPORTUNITY_COSTS = True    # True: include DOW running costs + DOW revenue in PnL
+USE_DOW_OPPORTUNITY_COSTS = False   # True: include DOW running costs + DOW revenue in PnL
                                    # False: exclude both DOW running costs and DOW revenue
 DOW_OPPORTUNITY_REVENUE = 188.0    # [EUR/MW DOW] — extra revenue per MW DOW (only when USE_DOW_OPPORTUNITY_COSTS=True)
 DOW_OFF_CONSUMPTION = 130.0        # [MW] — extra grid consumption from DOW when both blocks offline
 DOW_OFF_COMPENSATION = 6.9         # [EUR/MWh] — DOW compensation reducing grid cost on DOW portion
+OFFLINE_FIXED_PENALTY_NO_DOW = 3420.0  # [EUR/h] fixed plant-off penalty when USE_DOW_OPPORTUNITY_COSTS=False
 
 # ============================================================
 #                   MONTHLY LAYOUT (for Excel reporting)
