@@ -59,7 +59,7 @@ OUTPUT_FILE = os.path.join(os.path.dirname(INPUT_FILE), f"{_input_stem}_results_
 # ============================================================
 #                   DATE RANGE
 # ============================================================
-START_DATE = pd.Timestamp("2026-03-31 00:00")
+START_DATE = pd.Timestamp("2026-04-08 00:00")
 END_DATE = pd.Timestamp("2026-12-31 23:00")
 
 # ============================================================
@@ -101,7 +101,7 @@ DEFAULT_GRIDFEE = 0   # fallback grid fee [EUR/MWh]
 # ============================================================
 #                   DOW OPPORTUNITY COSTS
 # ============================================================
-USE_DOW_OPPORTUNITY_COSTS = True   # True: include DOW running costs + DOW revenue in PnL
+USE_DOW_OPPORTUNITY_COSTS = True    # True: include DOW running costs + DOW revenue in PnL
                                    # False: exclude both DOW running costs and DOW revenue
 DOW_OPPORTUNITY_REVENUE = 188.0    # [EUR/MW DOW] — extra revenue per MW DOW (only when USE_DOW_OPPORTUNITY_COSTS=True)
 DOW_OFF_CONSUMPTION = 130.0        # [MW] — extra grid consumption from DOW when both blocks offline

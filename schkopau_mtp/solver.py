@@ -32,12 +32,16 @@ def create_solver():
     """Create and configure the MILP solver instance."""
     if cfg.USE_MOSEK:
         solver = SolverFactory("mosek")
+        solver.options["MSK_DPAR_MIO_TOL_REL_GAP"] = cfg.MOSEK_MIO_TOL_REL_GAP
+        solver.options["MSK_DPAR_MIO_MAX_TIME"] = cfg.MOSEK_MIO_MAX_TIME
+        solver.options["MSK_IPAR_MIO_CONSTRUCT_SOL"] = "MSK_ON"
+        # Tuning: different seed explores different B&B paths
+        solver.options["MSK_IPAR_MIO_SEED"] = "7"
     else:
         solver = SolverFactory("highs")
+        solver.options["mip_rel_gap"] = float(cfg.MOSEK_MIO_TOL_REL_GAP)
+        solver.options["time_limit"] = float(cfg.MOSEK_MIO_MAX_TIME)
 
-    solver.options["MSK_DPAR_MIO_TOL_REL_GAP"] = cfg.MOSEK_MIO_TOL_REL_GAP
-    solver.options["MSK_DPAR_MIO_MAX_TIME"] = cfg.MOSEK_MIO_MAX_TIME
-    solver.options["MSK_IPAR_MIO_CONSTRUCT_SOL"] = "MSK_ON"  # use initial variable values
     return solver
 
 
@@ -90,8 +94,10 @@ def solve_model(solver, model, *, tee: bool = True):
                 v = pyomo_var.value
             if v is not None:
                 idx = mosek_var if isinstance(mosek_var, int) else mosek_var.index
-                xx[idx] = float(v)
+                # Only set integer variables in the hint — let CONSTRUCT_SOL
+                # solve the LP for continuous variables
                 if vartypes[idx] == mosek.variabletype.type_int:
+                    xx[idx] = float(v)
                     n_int_set += 1
                 else:
                     n_cont_set += 1
@@ -108,6 +114,24 @@ def solve_model(solver, model, *, tee: bool = True):
                          if vartypes[j] == mosek.variabletype.type_int
                          and abs(xx[j] - 1.0) < 0.01)
             print(f"--- Integer vars set to 1: {n_ones} / {n_int_set}")
+
+            # Verify putxx took effect
+            xx_back = task.getxx(mosek.soltype.itg)
+            n_diff = sum(1 for j in range(numvar) if abs(xx[j] - xx_back[j]) > 1e-8)
+            print(f"--- putxx verification: {n_diff} values differ after readback")
+
+            # Compute warm-start objective estimate from the xx vector
+            # Read objective coefficients from MOSEK task
+            numcon = task.getnumcon()
+            obj_sense = task.getobjsense()
+            c = [0.0] * numvar
+            for j in range(numvar):
+                c[j] = task.getcj(j)
+            obj_est = sum(c[j] * xx[j] for j in range(numvar))
+            cfix = task.getcfix()
+            obj_est += cfix
+            print(f"--- Warm-start estimated objective: {obj_est:,.0f} EUR "
+                  f"(cfix={cfix:,.0f}, sense={'max' if obj_sense == mosek.objsense.maximize else 'min'})")
         return original_apply()
 
     solver._apply_solver = _patched_apply

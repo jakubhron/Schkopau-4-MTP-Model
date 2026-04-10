@@ -180,10 +180,12 @@ def _compute_pnl(df: pd.DataFrame, cost_meta: dict) -> pd.DataFrame:
     for b in cfg.BLOCKS:
         on_b = df[f"on_model_{b}"]
         P_b = df[f"P_{b}"]
-        # P_eff = P + DOW * on for the active DOW block (dispatch-based)
-        # Primary (A): gets DOW when on
-        # Other  (B): gets DOW when on AND primary is off
-        if b == cfg.DOW_BLOCK:
+        # P_eff follows peff_def_rule:
+        # USE_DOW=True:  P_eff = P + DOW (DOW coal included)
+        # USE_DOW=False: P_eff = P       (DOW deducted from Pmax, lower costs)
+        if not cfg.USE_DOW_OPPORTUNITY_COSTS:
+            P_eff_b = P_b
+        elif b == cfg.DOW_BLOCK:
             P_eff_b = P_b + _dow_vals * on_b
         else:
             _both_on = (df[f"on_model_{cfg.DOW_BLOCK}"] * on_b)

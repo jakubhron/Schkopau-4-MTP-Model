@@ -1,0 +1,2 @@
+[console_scripts]
+schkopau-mtp = schkopau_mtp.__main__:main

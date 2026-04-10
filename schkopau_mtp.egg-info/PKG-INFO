@@ -1,0 +1,18 @@
+Metadata-Version: 2.4
+Name: schkopau-mtp
+Version: 0.2.0
+Summary: Schkopau power plant medium-term dispatch optimisation model
+Author-email: JH <jakub.hron@epcommodities.cz>
+License: Proprietary
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.24
+Requires-Dist: pandas>=2.0
+Requires-Dist: pyarrow>=14.0
+Requires-Dist: pyomo>=6.6
+Requires-Dist: openpyxl>=3.1
+Requires-Dist: mosek>=10.0
+Requires-Dist: highspy>=1.13
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: ruff>=0.4; extra == "dev"

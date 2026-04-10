@@ -56,6 +56,7 @@ def build_model(df: pd.DataFrame, cost_meta: dict) -> ConcreteModel:
     m = ConcreteModel()
     m.T = RangeSet(0, T_len - 1)
     m.B = Set(initialize=cfg.BLOCKS)
+    m._timestamps = idx["Date"].to_dict()  # t -> datetime
 
     # --------------------------------------------------------
     #  Common parameters (indexed by T only)
@@ -120,6 +121,7 @@ def build_model(df: pd.DataFrame, cost_meta: dict) -> ConcreteModel:
     m.startup = Var(m.B, m.T, within=Binary)
     m.shutdown = Var(m.B, m.T, bounds=(0, 1))  # continuous – implied binary by equality + on integrality
 
+    # When USE_DOW=False, P_eff=P so UB matches Pmax; when True, P_eff=P+DOW so UB=Pmax
     m.P_eff = Var(m.B, m.T, bounds=lambda m, b, t: (0, _pmax_eff[b]))
     m.run_costs = Var(m.B, m.T, bounds=(0, None))
 
@@ -201,6 +203,7 @@ def build_model(df: pd.DataFrame, cost_meta: dict) -> ConcreteModel:
                 )
 
             m.coal_monthly_limit = Constraint(m.coal_months, rule=coal_monthly_rule)
+
             print(f"--- Coal constraints: {len(_active_months)} months active")
 
     # --------------------------------------------------------
@@ -221,7 +224,7 @@ def warm_start_heuristic(m) -> None:
     B_list = sorted(m.B)
     T_len = len(T_list)
 
-    # --- Phase 1: "always-on" baseline schedule per block ---
+    # --- Phase 1: turn ON all available hours ---
     on_hint = {}
     for b in B_list:
         on_b = [0] * T_len
@@ -230,7 +233,7 @@ def warm_start_heuristic(m) -> None:
             if unavail >= 0.5:
                 on_b[t] = 0
             else:
-                on_b[t] = 1  # default: stay on whenever available
+                on_b[t] = 1
 
         # Force t=0 to match the model's fixed initial state
         init_unavail = float(value(m.unavailibility[b, 0]))
@@ -252,18 +255,49 @@ def warm_start_heuristic(m) -> None:
                     i += 1
 
         on_hint[b] = on_b
+        n_on = sum(on_b)
+        n_avail = sum(1 for t in T_list if float(value(m.unavailibility[b, t])) < 0.5)
+        n_unavail = T_len - n_avail
+        if n_avail > 0:
+            print(f"    Phase 1 block {b}: {n_on} ON / {T_len} total "
+                  f"({n_avail} avail, {n_unavail} unavail = "
+                  f"{n_avail/T_len*100:.0f}% availability)")
+        else:
+            print(f"    Phase 1 block {b}: fully unavailable ({T_len} hours)")
+
+        # Print contiguous unavailability periods
+        if n_unavail > 0:
+            unavail_ts = [t for t in T_list if float(value(m.unavailibility[b, t])) >= 0.5]
+            periods = []
+            start = unavail_ts[0]
+            prev = unavail_ts[0]
+            for t in unavail_ts[1:]:
+                if t == prev + 1:
+                    prev = t
+                else:
+                    periods.append((start, prev))
+                    start = t
+                    prev = t
+            periods.append((start, prev))
+            for s, e in periods:
+                dt_s = m._timestamps[s]
+                dt_e = m._timestamps[e]
+                print(f"      Block {b} is unavailable from "
+                      f"{dt_s.strftime('%d.%m.%Y %H:%M')} - "
+                      f"{dt_e.strftime('%d.%m.%Y %H:%M')}")
 
     # --- Phase 1b: respect monthly coal constraints ---
     if hasattr(m, "coal_monthly_limit") and hasattr(m, "_month_hours"):
-        # Coal rate at Pmin — MOSEK CONSTRUCT_SOL optimises continuous P,
-        # so we only need the on/off schedule feasible at minimum coal.
-        # DOW only goes to DOW_BLOCK when both blocks are on.
+        # Coal rate at minimum dispatch level — when both blocks are ON,
+        # p_lower forces P ≥ Pmin + boost, so account for that.
         coal_rate_min: dict = {}
         for b in B_list:
             for t in T_list:
                 pmin = float(value(m.Pmin[b, t]))
-                dow = float(value(m.DOW[t])) if b == cfg.DOW_BLOCK else 0.0
-                p_eff_min = pmin + dow
+                both = 1 if all(on_hint[bb][t] == 1 for bb in B_list) else 0
+                boost = cfg.DUAL_BLOCK_BOOST * both
+                dow = float(value(m.DOW[t])) if (b == cfg.DOW_BLOCK and cfg.USE_DOW_OPPORTUNITY_COSTS) else 0.0
+                p_eff_min = pmin + boost + dow
                 rate = (float(value(m.coal_slope[b, t])) * p_eff_min
                         + float(value(m.coal_fixed[b, t])))
                 coal_rate_min[(b, t)] = max(rate, 0.0)
@@ -276,9 +310,15 @@ def warm_start_heuristic(m) -> None:
             limit = float(value(m.coal_limit_t[ym]))
             hours = _month_t[ym]
 
-            # Use P_eff@Pmin (not just P@Pmin) — DOW adds coal consumption.
-            # Also apply 90% safety margin for MIN_UP extension overhead.
-            effective_limit = limit * 0.85
+            # Compute block availability: fraction of block-hours that are available
+            avail_hours = sum(
+                1 for b in B_list for t in hours
+                if float(value(m.unavailibility[b, t])) < 0.5
+            )
+            max_hours = len(B_list) * len(hours)
+            avail_pct = avail_hours / max_hours if max_hours > 0 else 1.0
+            # Use full coal limit for Pmin pass (Phase 1b+ handles Pmax scaling)
+            effective_limit = limit
 
             total_coal = sum(
                 coal_rate_min[(b, t)] * on_hint[b][t]
@@ -437,11 +477,10 @@ def warm_start_heuristic(m) -> None:
                             both = 1 if all(on_hint[bb][tt] == 1 for bb in B_list) else 0
                             pmax_tt = float(value(m.Pmax[b, tt]))
                             dow_tt = float(value(m.DOW[tt]))
-                            # p_upper: P ≤ (Pmax - DOW)*on + boost*both_on (for DOW block)
+                            # p_upper: DOW always deducted from Pmax
                             if b == cfg.DOW_BLOCK:
                                 p_cap = (pmax_tt - dow_tt) + cfg.DUAL_BLOCK_BOOST * both
                             else:
-                                # For non-DOW block: P ≤ Pmax*on - DOW*(on - both_on) + boost*both_on
                                 p_cap = pmax_tt - dow_tt * (1 - both) + cfg.DUAL_BLOCK_BOOST * both
                             p_val = min(ramp_profile[h] + cfg.DUAL_BLOCK_BOOST * both, p_cap)
                             m.P[b, tt].value = p_val
@@ -456,6 +495,77 @@ def warm_start_heuristic(m) -> None:
         m.both_on[t].value = 1 if all(v == 1 for v in on_vals) else 0
         m.plant_off[t].value = 1 if all(v == 0 for v in on_vals) else 0
 
+    # --- Phase 2: scale P up from Pmin toward Pmax within coal budget ---
+    if hasattr(m, "coal_monthly_limit") and hasattr(m, "_month_hours"):
+        _primary = cfg.DOW_BLOCK
+        for ym in sorted(m._month_hours):
+            if ym not in {tuple(k) for k in m.coal_months}:
+                continue
+            limit = float(value(m.coal_limit_t[ym]))
+            hours = m._month_hours[ym]
+
+            # Coal at current P (= Pmin)
+            coal_at_pmin = 0.0
+            for b in B_list:
+                for t in hours:
+                    on_val = round(m.on[b, t].value or 0)
+                    if on_val == 1:
+                        p_val = m.P[b, t].value or 0.0
+                        dow = float(value(m.DOW[t]))
+                        both = round(m.both_on[t].value or 0)
+                        if cfg.USE_DOW_OPPORTUNITY_COSTS:
+                            if b == _primary:
+                                p_eff = p_val + dow
+                            else:
+                                p_eff = p_val + dow * (1 - both)
+                        else:
+                            p_eff = p_val  # P_eff = P when DOW flag off
+                        coal_at_pmin += (float(value(m.coal_slope[b, t])) * p_eff
+                                         + float(value(m.coal_fixed[b, t])))
+
+            coal_headroom = limit - coal_at_pmin
+            if coal_headroom <= 0:
+                continue
+
+            # Marginal coal per MW increase: coal_slope (same for all P on the linear curve)
+            # Collect on-slots with room to grow
+            grow_slots = []
+            for b in B_list:
+                for t in hours:
+                    on_val = round(m.on[b, t].value or 0)
+                    if on_val != 1:
+                        continue
+                    # Skip startup/pre-shutdown hours (P must stay at Pmin)
+                    if round(m.startup[b, t].value or 0) == 1:
+                        continue
+                    if t + 1 < T_len and round(m.shutdown[b, t + 1].value or 0) == 1:
+                        continue
+                    p_val = m.P[b, t].value or 0.0
+                    both = round(m.both_on[t].value or 0)
+                    if not cfg.USE_DOW_OPPORTUNITY_COSTS:
+                        # DOW still deducted from Pmax (physical capacity reserved)
+                        dow = float(value(m.DOW[t])) if b == _primary else float(value(m.DOW[t])) * (1 - both)
+                        pmax = float(value(m.Pmax[b, t])) - dow + cfg.DUAL_BLOCK_BOOST * both
+                    elif b == _primary:
+                        pmax = (float(value(m.Pmax[b, t])) - float(value(m.DOW[t]))) + cfg.DUAL_BLOCK_BOOST * both
+                    else:
+                        pmax = float(value(m.Pmax[b, t])) - float(value(m.DOW[t])) * (1 - both) + cfg.DUAL_BLOCK_BOOST * both
+                    room = max(pmax - p_val, 0.0)
+                    if room > 0:
+                        slope = float(value(m.coal_slope[b, t]))
+                        grow_slots.append((b, t, room, slope))
+
+            if not grow_slots:
+                continue
+
+            # Distribute headroom proportionally across slots
+            total_marginal_coal = sum(room * slope for _, _, room, slope in grow_slots)
+            if total_marginal_coal <= 0:
+                continue
+            scale = min(coal_headroom / total_marginal_coal, 1.0)
+            for b, t, room, slope in grow_slots:
+                m.P[b, t].value += room * scale
+
     # Set P_eff and run_costs so the full xx vector is consistent
     _primary = cfg.DOW_BLOCK
     for b in B_list:
@@ -465,26 +575,65 @@ def warm_start_heuristic(m) -> None:
             dow = float(value(m.DOW[t]))
             both_on_val = m.both_on[t].value or 0
 
-            # P_eff = P + DOW component (mirrors peff_def_rule)
-            if b == _primary:
-                p_eff = p_val + dow * on_val
+            # P_eff mirrors peff_def_rule
+            if cfg.USE_DOW_OPPORTUNITY_COSTS:
+                if b == _primary:
+                    p_eff = p_val + dow * on_val
+                else:
+                    p_eff = p_val + dow * (on_val - both_on_val)
             else:
-                p_eff = p_val + dow * (on_val - both_on_val)
+                p_eff = p_val  # P_eff = P when DOW flag off
             # Cap P_eff to its variable bound; back-adjust P if needed
             peff_ub = m.P_eff[b, t].ub
             if p_eff > peff_ub:
                 p_eff = peff_ub
-                # Reverse-compute P from P_eff
-                if b == _primary:
-                    m.P[b, t].value = p_eff - dow * on_val
-                else:
-                    m.P[b, t].value = p_eff - dow * (on_val - both_on_val)
+                m.P[b, t].value = p_eff  # P = P_eff when capped
             m.P_eff[b, t].value = p_eff
 
             # run_costs = cost_slope * P_eff + cost_fixed * on
             rc = (float(value(m.cost_slope[b, t])) * p_eff
                   + float(value(m.cost_fixed[b, t])) * on_val)
             m.run_costs[b, t].value = rc
+
+    # --- Comprehensive warm-start constraint violation check ---
+    from pyomo.environ import Constraint as _Con
+    viol_counts: dict = {}
+    viol_examples: dict = {}
+    for con_obj in m.component_objects(_Con, active=True):
+        name = con_obj.name
+        n_viol = 0
+        worst_viol = 0.0
+        worst_idx = None
+        for idx in con_obj:
+            c = con_obj[idx]
+            try:
+                body = value(c.body)
+            except Exception:
+                continue
+            lb = value(c.lower) if c.lower is not None else None
+            ub = value(c.upper) if c.upper is not None else None
+            viol = 0.0
+            if lb is not None and body < lb - 1e-6:
+                viol = lb - body
+            if ub is not None and body > ub + 1e-6:
+                viol = max(viol, body - ub)
+            if viol > 0:
+                n_viol += 1
+                if viol > worst_viol:
+                    worst_viol = viol
+                    worst_idx = idx
+        if n_viol > 0:
+            viol_counts[name] = n_viol
+            viol_examples[name] = (worst_idx, worst_viol)
+
+    if viol_counts:
+        print(f"    DIAG: {len(viol_counts)} constraint blocks violated:")
+        for name in sorted(viol_counts, key=lambda n: -viol_counts[n]):
+            n = viol_counts[name]
+            idx, wv = viol_examples[name]
+            print(f"      {name}: {n} violations (worst={wv:.4f} at {idx})")
+    else:
+        print(f"    DIAG: ALL constraints satisfied")
 
     print("--- Warm-start heuristic applied")
 
@@ -536,14 +685,16 @@ def _add_coupling_constraints(m) -> None:
 def _add_cost_constraints(m) -> None:
     _primary = cfg.DOW_BLOCK
 
+    _use_dow = cfg.USE_DOW_OPPORTUNITY_COSTS
+
     def peff_def_rule(m, b, t):
-        # DOW follows actual dispatch:
-        #   Primary (A): always gets DOW when on
-        #   Other   (B): gets DOW only when on AND primary is off
+        # When USE_DOW=True:  P_eff = P + DOW (DOW coal included, DOW deducted from Pmax)
+        # When USE_DOW=False: P_eff = P       (DOW deducted from Pmax, lower running costs)
+        if not _use_dow:
+            return m.P_eff[b, t] == m.P[b, t]
         if b == _primary:
             dow_add = m.DOW[t] * m.on[b, t]
         else:
-            # DOW * on_B * (1 - on_A) = DOW * (on_B - both_on)
             dow_add = m.DOW[t] * (m.on[b, t] - m.both_on[t])
         return m.P_eff[b, t] == m.P[b, t] + dow_add
 
@@ -565,10 +716,12 @@ def _add_power_bounds(m) -> None:
 
     m.p_lower = Constraint(m.B, m.T, rule=p_lower)
 
+    _use_dow = cfg.USE_DOW_OPPORTUNITY_COSTS
+
     def p_upper(m, b, t):
-        # DOW reduces Pmax dynamically based on dispatch:
-        #   Primary: always deducted when on
-        #   Other:   deducted only when on AND primary is off
+        # DOW is always deducted from Pmax (physical capacity reserved for DOW)
+        # When USE_DOW=True:  P <= (Pmax-DOW)*on  →  P_eff=P+DOW <= Pmax
+        # When USE_DOW=False: P <= (Pmax-DOW)*on  →  P_eff=P     <= Pmax-DOW
         if b == _primary:
             return m.P[b, t] <= (m.Pmax[b, t] - m.DOW[t]) * m.on[b, t] + _boost * m.both_on[t]
         else:
@@ -779,25 +932,41 @@ def _add_min_up_down_constraints(m, T_len: int) -> None:
 def _add_shutdown_ramp_constraints(m) -> None:
     _boost = cfg.DUAL_BLOCK_BOOST
 
+    # Pre-compute per-(b,t) tight Big-M values (replaces global BIG_M=500)
+    # UB needs M >= Pmax - Pmin; LB needs M >= Pmin + boost (on=0 case)
+    _M_ub = {}  # tight M for upper-bound constraints
+    _M_lb = {}  # tight M for lower-bound constraints
+    for b in m.B:
+        for t in m.T:
+            pmax_bt = float(value(m.Pmax[b, t]))
+            pmin_bt = float(value(m.Pmin[b, t]))
+            _M_ub[(b, t)] = pmax_bt - pmin_bt + 1.0
+            _M_lb[(b, t)] = pmin_bt + _boost + 1.0
+
+    _M_ub_max = max(_M_ub.values()) if _M_ub else cfg.BIG_M
+    _M_lb_max = max(_M_lb.values()) if _M_lb else cfg.BIG_M
+    print(f"--- Startup/shutdown Big-M tightened: UB={_M_ub_max:.0f}, "
+          f"LB={_M_lb_max:.0f} (was {cfg.BIG_M})")
+
     def shutdown_requires_pmin_lb(m, b, t):
         if t == 0:
             return Constraint.Skip
-        return m.P[b, t - 1] >= m.Pmin[b, t - 1] + _boost * m.both_on[t - 1] - cfg.BIG_M * (1 - m.shutdown[b, t])
+        return m.P[b, t - 1] >= m.Pmin[b, t - 1] + _boost * m.both_on[t - 1] - _M_lb[(b, t - 1)] * (1 - m.shutdown[b, t])
 
     def shutdown_requires_pmin_ub(m, b, t):
         if t == 0:
             return Constraint.Skip
-        return m.P[b, t - 1] <= m.Pmin[b, t - 1] + _boost * m.both_on[t - 1] + cfg.BIG_M * (1 - m.shutdown[b, t])
+        return m.P[b, t - 1] <= m.Pmin[b, t - 1] + _boost * m.both_on[t - 1] + _M_ub[(b, t - 1)] * (1 - m.shutdown[b, t])
 
     m.shutdown_requires_pmin_lb = Constraint(m.B, m.T, rule=shutdown_requires_pmin_lb)
     m.shutdown_requires_pmin_ub = Constraint(m.B, m.T, rule=shutdown_requires_pmin_ub)
 
     # Startup hour: P must equal Pmin (unit starts at minimum load)
     def startup_requires_pmin_lb(m, b, t):
-        return m.P[b, t] >= m.Pmin[b, t] * m.on[b, t] + _boost * m.both_on[t] - cfg.BIG_M * (1 - m.startup[b, t])
+        return m.P[b, t] >= m.Pmin[b, t] * m.on[b, t] + _boost * m.both_on[t] - _M_lb[(b, t)] * (1 - m.startup[b, t])
 
     def startup_requires_pmin_ub(m, b, t):
-        return m.P[b, t] <= m.Pmin[b, t] * m.on[b, t] + _boost * m.both_on[t] + cfg.BIG_M * (1 - m.startup[b, t])
+        return m.P[b, t] <= m.Pmin[b, t] * m.on[b, t] + _boost * m.both_on[t] + _M_ub[(b, t)] * (1 - m.startup[b, t])
 
     m.startup_requires_pmin_lb = Constraint(m.B, m.T, rule=startup_requires_pmin_lb)
     m.startup_requires_pmin_ub = Constraint(m.B, m.T, rule=startup_requires_pmin_ub)
