@@ -185,7 +185,7 @@
 <h3>1.1  Plant description</h3>
 <p>Schkopau is a <strong>lignite-fired combined-heat-and-power (CHP) plant</strong> located in Germany.  It has <strong>two generating blocks</strong> (called <strong>Block A</strong> and <strong>Block B</strong>).  Each block can burn coal to produce electricity, and at the same time the plant delivers <strong>steam (heat)</strong> – labelled <strong>DOW</strong> (Dampf- und Wärmelieferung) – to a neighbouring industrial consumer.  The plant sells its electricity on the wholesale power market, earns revenue from the DOW steam delivery, and pays for coal, CO₂ emission allowances, start-up wear, grid fees, and its own auxiliary ("house") power consumption.</p>
 <h3>1.2  Purpose</h3>
-<p>The model determines an optimal operating schedule for the planning horizon (typically April to December, approximately 6 400 hours):</p>
+<p>The model determines an optimal operating schedule for the planning horizon (user defined time horizon in config file):</p>
 <blockquote>
 <p><strong>For every hour, should each block be ON or OFF, and if ON, at what power level?</strong></p>
 </blockquote>
@@ -723,6 +723,7 @@ plus a separate DOW coal allocation:</p>
 <th>Variable</th>
 <th>Type</th>
 <th>Meaning</th>
+<th>Why this design?</th>
 </tr>
 </thead>
 <tbody>
@@ -730,45 +731,65 @@ plus a separate DOW coal allocation:</p>
 <td><span class="arithmatex">\(\text{on}_{b,t}\)</span></td>
 <td><strong>Binary</strong> (0 or 1)</td>
 <td>Is block b running in hour t?</td>
+<td>This is a yes/no decision — the block is either running or it isn't. Binary variables are required for on/off decisions.</td>
 </tr>
 <tr>
 <td><span class="arithmatex">\(P_{b,t}\)</span></td>
 <td><strong>Continuous</strong> (MW)</td>
 <td>Electrical output of block b in hour t</td>
+<td>Power can be anywhere between minimum and maximum load. A continuous variable lets the optimizer choose the exact best MW level for each hour to maximize profit.</td>
 </tr>
 <tr>
 <td><span class="arithmatex">\(\text{startup}_{b,t}\)</span></td>
 <td><strong>Binary</strong></td>
 <td>Did block b just turn on in hour t?</td>
+<td>Startup <strong>must</strong> be declared binary because the startup tier variables (hot, cold, very-cold) are binary and linked to it through mutual-exclusivity rules — exactly one tier must be selected per startup event. If startup were continuous, the solver could pick fractional values (e.g. 0.3) that would break the tier selection logic and produce meaningless start-up costs.</td>
 </tr>
 <tr>
 <td><span class="arithmatex">\(\text{shutdown}_{b,t}\)</span></td>
 <td><strong>Continuous</strong> [0,1]</td>
 <td>Did block b just turn off in hour t?</td>
+<td>Shutdown <strong>can</strong> be continuous because, unlike startup, it has no dependent tier variables or branching logic attached to it. It is purely determined by the equation: shutdown = on(previous hour) − on(current hour). Since on is already binary, this equation automatically forces shutdown to be exactly 0 or 1 — no fractional values are possible. Declaring it continuous lets the solver skip one unnecessary on/off tracking variable, which speeds up computation.</td>
 </tr>
 <tr>
 <td><span class="arithmatex">\(\text{hot\_start}_{b,t}\)</span></td>
 <td><strong>Binary</strong></td>
-<td>Is this startup a <em>hot</em> start?</td>
+<td>Is this startup a <em>hot</em> start (5–10 hours offline)?</td>
+<td>Different startup costs and ramp-up speeds apply depending on how long a block was offline. Hot starts (short downtime) are cheaper and faster than cold starts. Binary variable identifies when this tier applies.</td>
+</tr>
+<tr>
+<td><span class="arithmatex">\(\text{warm\_start}_{b,t}\)</span></td>
+<td><em>(no variable — default)</em></td>
+<td>Is this startup a <em>warm</em> start (10–60 hours offline)?</td>
+<td>Warm start is the baseline startup type. When none of the other startup tier variables equal 1, the model automatically treats it as a warm start. No separate variable needed — saves memory and computation.</td>
+</tr>
+<tr>
+<td><span class="arithmatex">\(\text{cold\_start}_{b,t}\)</span></td>
+<td><strong>Binary</strong></td>
+<td>Is this startup a <em>cold</em> start (60–100 hours offline)?</td>
+<td>Cold starts (moderate-length downtime) cost more than warm starts because equipment has cooled down. Binary variable identifies when this higher-cost tier applies and triggers the appropriate startup ramp profile.</td>
 </tr>
 <tr>
 <td><span class="arithmatex">\(\text{vcold\_start}_{b,t}\)</span></td>
 <td><strong>Binary</strong></td>
-<td>Is this startup a <em>very-cold</em> start?</td>
+<td>Is this startup a <em>very-cold</em> start (≥100 hours offline)?</td>
+<td>Very cold starts (long downtime) are the most expensive and slowest to ramp up. Binary variable identifies this highest-cost tier and enforces the longest ramp-up sequence.</td>
 </tr>
 <tr>
 <td><span class="arithmatex">\(\text{both\_on}_t\)</span></td>
 <td><strong>Continuous</strong> [0,1]</td>
 <td>Are <strong>both</strong> blocks on at once?</td>
+<td>When both blocks run simultaneously, special rules apply (power boost constraint, DOW steam allocation). Continuous variable is forced to behave as binary through constraints — equals 1 only when both blocks are running.</td>
 </tr>
 <tr>
 <td><span class="arithmatex">\(\text{plant\_off}_t\)</span></td>
 <td><strong>Continuous</strong> [0,1]</td>
 <td>Are <strong>both</strong> blocks off (entire plant dark)?</td>
+<td>When the entire plant is offline, we still consume a small amount of house power and pay grid fees. Continuous variable (constrained to binary behavior) tracks when this cost applies.</td>
 </tr>
 </tbody>
 </table>
-<p>Binary variables are restricted to {0, 1} (on/off decisions).  The power variable <span class="arithmatex">\(P\)</span> is continuous, taking any value between <span class="arithmatex">\(P_{\min}\)</span> and <span class="arithmatex">\(P_{\max}\)</span>.</p>
+<p><strong>Note on variable types:</strong> Binary variables can only be 0 or 1 (yes/no decisions). Continuous variables can take any value in a range. Some continuous variables (shutdown, both_on, plant_off) are constrained by the model's mathematical rules to only ever equal 0 or 1 in practice, making them "implied binary." This speeds up the solver by reducing the number of explicit on/off decisions it must track.</p>
 <h3>3.2  Effective power and DOW</h3>
 <p>The industrial neighbour draws steam (DOW) from whichever block is running.  When both blocks run, one block "owns" the full DOW load; only if that primary block (Block A) shuts down does the other block pick up the steam load.</p>
 <p>The model supports <strong>two DOW modes</strong>, controlled by the <code>USE_DOW_OPPORTUNITY_COSTS</code> flag:</p>
@@ -778,12 +799,20 @@ plus a separate DOW coal allocation:</p>
 <p><span class="arithmatex">\(P_{\text{eff}}\)</span> is the <em>total thermal-equivalent load on the boiler</em> (electrical output plus steam).  It is this effective power that determines fuel consumption and running costs.  DOW revenues are computed as <span class="arithmatex">\(\text{DOW\_OPPORTUNITY\_REVENUE} \times \text{DOW}\)</span> (188 EUR/MW × DOW load in MW) and credited whenever at least one block is running.</p>
 <p><strong>When <code>USE_DOW_OPPORTUNITY_COSTS = False</code> (DOW OFF):</strong></p>
 <div class="arithmatex">\[P_{\text{eff},b,t} = P_{b,t}\]</div>
-<p>In this mode, <span class="arithmatex">\(P_{\text{eff}}\)</span> equals electrical output only — no DOW steam load is added to the effective boiler load.  DOW revenues are set to zero.  However, DOW is <strong>still deducted from the power upper bound</strong> (Pmax) in both modes, because the physical capacity reserved for steam extraction is a hard constraint regardless of the accounting treatment.  This means:</p>
+<p>This scenario was created to produce results <strong>comparable with the KYOS model</strong>, which does not model DOW opportunity costs explicitly.  In this mode:</p>
 <ul>
-<li>The block's maximum <em>electrical</em> output is always <span class="arithmatex">\(P_{\max} - \text{DOW}\)</span> (the steam extraction physically steals capacity).</li>
-<li>But in DOW OFF mode, the coal consumption and running costs are computed on electrical output alone, as if the steam load were free.</li>
+<li><span class="arithmatex">\(P_{\text{eff}}\)</span> equals electrical output only — no DOW steam load is added to the effective boiler load.</li>
+<li><strong>No DOW revenues</strong> are included (DOW revenues are set to zero for all hours).</li>
+<li>Coal consumption and running costs are computed on electrical output alone.</li>
 </ul>
-<p>This two-mode design lets the model compare "full DOW reality" scenarios vs "pure merchant" what-if analyses.</p>
+<p>However, the DOW-related costs are <strong>not ignored entirely</strong> — they are reflected as a simplified constant penalty when the entire plant is offline.  Specifically, when both blocks are shut down, the model charges:</p>
+<ol>
+<li><strong>House power cost</strong>: the plant's own consumption of 10 MW must be purchased from the grid at the hourly market price plus grid fee — <span class="arithmatex">\(\text{OWN\_CONSUMPTION} \times (\text{Price}_t + \text{GridFee}_t)\)</span>.</li>
+<li><strong>Fixed offline penalty</strong>: a flat charge of <strong>3 420 EUR per hour</strong> (<code>OFFLINE_FIXED_PENALTY_NO_DOW</code>), which approximates the DOW-related costs (steam must still be supplied to the industrial neighbour even when both blocks are offline, incurring grid and equipment costs).</li>
+</ol>
+<p>This gives a total offline cost per hour of roughly <strong>3 420 EUR</strong> (fixed penalty) <strong>+ ~700–900 EUR</strong> (10 MW house power at typical prices), applied only to hours when both blocks are off.</p>
+<p>DOW is <strong>still deducted from the power upper bound</strong> (Pmax) in both modes, because the physical capacity reserved for steam extraction is a hard constraint regardless of the accounting treatment.  The block's maximum <em>electrical</em> output is always <span class="arithmatex">\(P_{\max} - \text{DOW}\)</span>.</p>
+<p>This two-mode design lets the model produce results aligned with the KYOS benchmark (DOW OFF) while also supporting full DOW opportunity-cost analysis (DOW ON).</p>
 <h3>3.3  Objective function</h3>
 <p>The model <strong>maximises total profit</strong> over all hours:</p>
 <div class="arithmatex">\[\max \sum_{t} \Bigl[\underbrace{P_{b,t} \times \text{Price}_t}_{\text{electricity revenue}} - \underbrace{\text{run\_costs}_{b,t}}_{\text{fuel + CO₂ + variable}} - \underbrace{\text{start\_cost}_{b,t}}_{\text{wear \&amp; tear}} - \underbrace{\text{OFF\_costs}_t}_{\text{house power if off}} + \underbrace{\text{DOW\_rev}_t}_{\text{steam income}}\Bigr]\]</div>
@@ -796,16 +825,46 @@ plus a separate DOW coal allocation:</p>
 <p><strong>Running costs</strong> — the linearised fuel + emissions cost: <span class="arithmatex">\(\text{cost\_slope} \times P_{\text{eff}} + \text{cost\_fixed} \times \text{on}\)</span>.  This includes coal, CO₂ allowances, variable O&amp;M, and other operating charges embedded in TC_PminN and TC_Pmax.</p>
 </li>
 <li>
-<p><strong>Start-up costs</strong> — a lump sum charged when <code>startup = 1</code>.  The amount depends on the tier:</p>
+<p><strong>Start-up costs</strong> — a lump sum charged when <code>startup = 1</code>.  The model uses <strong>warm start as the baseline cost</strong> and adds incremental adjustments for other tiers.  The formula is:</p>
 </li>
-<li>Warm cost is the baseline: <span class="arithmatex">\((\text{warm\_cost} + \text{START\_MARGIN\_MIN}) \times \text{startup}\)</span></li>
-<li>Hot start adjusts: <span class="arithmatex">\(+(\text{hot\_cost} - \text{warm\_cost}) \times \text{hot\_start}\)</span></li>
-<li>
-<p>Very-cold start adjusts: <span class="arithmatex">\(+(\text{vcold\_cost} - \text{warm\_cost}) \times \text{vcold\_start}\)</span></p>
-</li>
-<li>
-<p><strong>OFF costs</strong> — when the entire plant is offline, the model charges two components:</p>
-</li>
+</ol>
+<p>$<span class="arithmatex">\(\text{start\_cost}_{b,t} = (\text{warm\_cost}_b + \text{START\_MARGIN\_MIN}) \times \text{startup}_{b,t} + \Delta_{\text{hot},b} \times \text{hot\_start}_{b,t} + \Delta_{\text{cold},b} \times \text{cold\_start}_{b,t} + \Delta_{\text{vcold},b} \times \text{vcold\_start}_{b,t}\)</span>$</p>
+<p>Where each <span class="arithmatex">\(\Delta\)</span> is the difference from the warm baseline:</p>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Condition</th>
+<th>Cost adjustment</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Hot</strong> (5–10 h off)</td>
+<td>Equipment still warm; cheapest restart</td>
+<td><span class="arithmatex">\(\Delta_{\text{hot}} = \text{hot\_cost} - \text{warm\_cost}\)</span> (negative — reduces cost below warm baseline)</td>
+</tr>
+<tr>
+<td><strong>Warm</strong> (10–60 h off)</td>
+<td>Baseline tier — no adjustment needed</td>
+<td><span class="arithmatex">\(\Delta = 0\)</span> (warm cost is already the baseline)</td>
+</tr>
+<tr>
+<td><strong>Cold</strong> (60–100 h off)</td>
+<td>Equipment cooled significantly</td>
+<td><span class="arithmatex">\(\Delta_{\text{cold}} = \text{cold\_cost} - \text{warm\_cost}\)</span> (positive — adds cost above warm baseline)</td>
+</tr>
+<tr>
+<td><strong>Very cold</strong> (≥100 h off)</td>
+<td>Full cold start; most expensive</td>
+<td><span class="arithmatex">\(\Delta_{\text{vcold}} = \text{vcold\_cost} - \text{warm\_cost}\)</span> (positive — largest surcharge)</td>
+</tr>
+</tbody>
+</table>
+<p>Note: the <strong>very hot</strong> tier (off &lt; 5 hours) cannot occur because the minimum down-time is 6 hours — the block physically cannot restart that quickly.</p>
+<p><strong><code>START_MARGIN_MIN</code></strong> is an optional additional hurdle (in EUR) added on top of every startup cost regardless of tier.  It is defined in the config file and currently set to <strong>0 EUR</strong>, meaning it has no effect.  If set to a positive value, it would make the model require that each startup generates at least that much extra profit to justify turning on — acting as a safety margin against marginal startups that barely break even.  Because it is multiplied by <code>startup</code> (not by a tier variable), it applies equally to all startup types.</p>
+<ol>
+<li><strong>OFF costs</strong> — when the entire plant is offline, the model charges two components:</li>
 <li><strong>House power</strong>: the plant's own auxiliary consumption (10 MW) is charged at <span class="arithmatex">\((\text{Price} + \text{Grid fee})\)</span> per MWh in both DOW modes.</li>
 <li><strong>DOW mode ON</strong> (<code>USE_DOW_OPPORTUNITY_COSTS = True</code>): the DOW consumer's electric backup (130 MW) is charged at the <strong>grid fee only</strong> (not the market price), minus a partial compensation of 6.9 EUR/MWh.</li>
 <li>
@@ -922,9 +981,23 @@ plus a separate DOW coal allocation:</p>
 <p>Binary variables <code>hot_start</code>, <code>cold_start</code>, and <code>vcold_start</code> are linked to <code>startup</code> with mutual-exclusivity constraints so that if a start occurs, exactly one tier applies (or none, which means warm).</p>
 <p>The <em>very hot</em> tier (off &lt; 5 h) is structurally impossible because <code>MIN_DOWN = 6 h</code>; it has no binary variable.</p>
 <h3>4.8  Both-on and plant-off linearisation</h3>
-<p><code>both_on</code> and <code>plant_off</code> are auxiliary coupling variables, forced by standard linearisation constraints:</p>
-<div class="arithmatex">\[\text{both\_on}_t \le \text{on}_{A,t}, \quad \text{both\_on}_t \le \text{on}_{B,t}, \quad \text{both\_on}_t \ge \text{on}_{A,t} + \text{on}_{B,t} - 1\]</div>
-<p>This ensures <code>both_on = 1</code> if and only if <strong>both</strong> blocks are simultaneously on.  Analogous constraints define <code>plant_off = 1</code> only when <strong>both</strong> blocks are off.</p>
+<p>The model needs to know two plant-level facts for each hour:</p>
+<ul>
+<li><strong>Are both blocks running at the same time?</strong> (needed for the dual-block power boost and DOW steam allocation)</li>
+<li><strong>Is the entire plant off?</strong> (needed to charge offline costs — house power and DOW penalties)</li>
+</ul>
+<p>These facts depend on the combination of Block A's and Block B's on/off status.  For example, "both blocks on" is logically just "Block A is on <strong>AND</strong> Block B is on."  However, the optimiser works with linear equations, not logical AND/OR operations.  The model therefore introduces two helper variables — <code>both_on</code> and <code>plant_off</code> — and uses linear inequalities to force them to behave exactly like AND/OR logic.</p>
+<p><strong>both_on</strong> — equals 1 only when both blocks are running:</p>
+<div class="arithmatex">\[\text{both\_on}_t \le \text{on}_{A,t}\]</div>
+<div class="arithmatex">\[\text{both\_on}_t \le \text{on}_{B,t}\]</div>
+<div class="arithmatex">\[\text{both\_on}_t \ge \text{on}_{A,t} + \text{on}_{B,t} - 1\]</div>
+<p>The first two rules say: if either block is off, <code>both_on</code> cannot be 1.  The third rule says: if both blocks are on (sum = 2), then <code>both_on</code> must be at least 1.  Together, these three rules guarantee that <code>both_on = 1</code> if and only if both blocks are simultaneously running.</p>
+<p><strong>plant_off</strong> — equals 1 only when both blocks are off (the entire plant is shut down):</p>
+<div class="arithmatex">\[\text{plant\_off}_t \ge 1 - \text{on}_{A,t} - \text{on}_{B,t}\]</div>
+<div class="arithmatex">\[\text{plant\_off}_t \le 1 - \text{on}_{A,t}\]</div>
+<div class="arithmatex">\[\text{plant\_off}_t \le 1 - \text{on}_{B,t}\]</div>
+<p>The same logic in reverse: if either block is on, <code>plant_off</code> is forced to 0.  If both blocks are off (sum = 0), <code>plant_off</code> is forced to 1.</p>
+<p>This technique — replacing logical conditions with linear inequalities — is called <strong>linearisation</strong> and is a standard method in optimisation modelling.</p>
 <h3>4.9  Optional: start-up ramp profile</h3>
 <p>The model has two ramp modes, controlled by the <code>USE_SIMPLE_STARTUP_RAMP</code> flag:</p>
 <ul>
@@ -935,7 +1008,57 @@ plus a separate DOW coal allocation:</p>
 <p><strong>Detailed mode (current, <code>False</code>)</strong>: The model limits output during startup hours to follow the configured ramp profiles.  The <code>in_ramp</code> variable tracks the startup window, and Big-M constraints relax the Pmin lower bound during ramp hours to allow lower profile levels.  This is the currently used mode.</p>
 </li>
 </ul>
-<p><strong>Important implementation detail</strong>: the ramp envelope constraints start from hour <strong>h = 1</strong> after the startup, not h = 0.  Hour 0 (the startup hour itself) is already pinned to exactly Pmin by the <code>startup_requires_pmin_lb/ub</code> constraints (Section 4.6).  Applying a separate ramp bound at h = 0 would create contradictory constraints and could make the model infeasible.  The warm-start heuristic mirrors this by skipping ramp-profile power overrides at h = 0.</p>
+<p><strong>Important implementation detail — why ramp profiles skip hour 0:</strong></p>
+<p>When a block starts up, it goes through a sequence of hours with increasing power output.  Call the startup hour itself "hour 0" and the following hours "hour 1", "hour 2", etc.</p>
+<p>Two separate sets of rules govern what happens during these hours:</p>
+<ol>
+<li>
+<p><strong>Section 4.6 rules</strong> (startup/shutdown power fixing): force the block to produce <strong>exactly Pmin</strong> in the startup hour (hour 0).  These rules set both a floor (P ≥ Pmin) and a ceiling (P ≤ Pmin) at Pmin simultaneously, meaning the only valid output is exactly Pmin — the block cannot produce more or less than that value in that hour.</p>
+</li>
+<li>
+<p><strong>Ramp profile rules</strong> (this section): limit power output in subsequent hours to follow the configured ramp-up schedule — for example, a warm start might allow 216 MW in hour 1, 433 MW in hour 2, and full power from hour 3 onward.</p>
+</li>
+</ol>
+<p>The problem is: if the ramp profile also tried to set a limit at hour 0, it could <strong>conflict</strong> with the Section 4.6 rule that fixes power to exactly Pmin.  Consider this concrete example using a <strong>very-cold start</strong> for Block B (Pmin = 160 MW):</p>
+<table>
+<thead>
+<tr>
+<th>Hour</th>
+<th>Section 4.6: power fixed to exactly Pmin</th>
+<th>Ramp profile (very-cold)</th>
+<th>Conflict?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>0</strong> (startup hour)</td>
+<td>P must be <strong>exactly 160 MW</strong></td>
+<td>Max 30 MW</td>
+<td><strong>Yes — impossible!</strong>  The block must be at 160 MW but the ramp says it cannot exceed 30 MW. No valid output exists.</td>
+</tr>
+<tr>
+<td>1</td>
+<td><em>(not applied — normal bounds)</em></td>
+<td>Max 180 MW</td>
+<td>No conflict — 180 MW &gt; Pmin, so the block can run at 160–180 MW.</td>
+</tr>
+<tr>
+<td>2</td>
+<td><em>(not applied)</em></td>
+<td>Max 397 MW</td>
+<td>No conflict.</td>
+</tr>
+<tr>
+<td>3</td>
+<td><em>(not applied)</em></td>
+<td>Max 440 MW (full power)</td>
+<td>No conflict.</td>
+</tr>
+</tbody>
+</table>
+<p>If both rules applied at hour 0, the solver would find no feasible power output (160 MW is required but only 30 MW is allowed) and declare the problem <strong>infeasible</strong> — meaning "there is no schedule that satisfies all rules."</p>
+<p>A hot start profile <code>[170, 262, 440]</code> would not cause a conflict at hour 0 (170 &gt; 160), but the model still skips it for consistency and safety — future parameter changes could introduce new conflicts.</p>
+<p>To avoid this, the ramp profile constraints <strong>deliberately skip hour 0</strong> and only apply from hour 1 onward.  Hour 0 is already fully controlled by the Section 4.6 rule that fixes output to exactly Pmin.  The warm-start heuristic (Section 5.5) follows the same convention.</p>
 <hr />
 <h2>5. Coal Limits: The Binding Scarcity Constraint</h2>
 <h3>5.1  Why coal limits matter</h3>
@@ -990,11 +1113,32 @@ for b in [&quot;A&quot;, &quot;B&quot;]:
 </code></pre>
 <p><strong>Step 4 — Enforce minimum down-time (3 passes).</strong></p>
 <p>Whenever the code sees a transition from ON to OFF (i.e. <code>on_b[i-1] == 1</code> and <code>on_b[i] == 0</code>), it forces the <strong>next 6 hours</strong> to also be OFF.  This reflects the physical requirement: once a block shuts down, it needs at least 6 hours for the turbine to cool before it can restart.</p>
-<p>The code runs this check 3 times (3 "passes"), because forcing hours OFF can create new transitions that need their own 6-hour cooldown.  For example:</p>
-<pre><code>Pass 1: Outage at hour 50 → OFF hours 50-55
-Pass 2: The new OFF at hour 55 might conflict with another period → extend
-Pass 3: Resolve any remaining cascades
+<p><strong>What if an outage is already longer than 6 hours?</strong>  This rule only looks at the moment when the block goes from ON to OFF — the <em>transition point</em>.  If a planned outage already lasts, say, 20 hours, the minimum down-time is already satisfied and the code does nothing extra.  For example:</p>
+<pre><code>Hours:  ... 48  49 | 50  51  52  ... 69 | 70  71 ...
+State:  ... ON  ON | OFF OFF OFF ... OFF| ON  ON ...
+                   ^                     ^
+                   Transition ON→OFF     Transition OFF→ON
+                   (outage start)        (outage end)
 </code></pre>
+<p>The rule checks hour 50 (the first OFF after ON) and asks: "are the next 6 hours also OFF?"  Since the outage runs all the way to hour 69 (20 hours), the answer is yes — no changes needed.  The minimum down-time rule only forces additional OFF hours when a short gap (fewer than 6 hours) appears between two ON periods.</p>
+<p>The code runs this check 3 times (3 "passes"), because forcing hours OFF can create new transitions that need their own 6-hour cooldown.  Here is a detailed example showing why multiple passes are necessary:</p>
+<p><strong>Starting situation</strong> — suppose the schedule has two short outages close together:</p>
+<pre><code>Hour:   44  45  46  47  48  49  50  51  52  53  54  55  56  57  58
+State:  ON  ON  ON  OFF OFF ON  ON  ON  OFF OFF OFF ON  ON  ON  ON
+                    ^^^       gap = 2h      ^^^^^^^^^^^
+                    Outage 1 (2h)           Outage 2 (3h)
+</code></pre>
+<p><strong>Pass 1</strong> — The code scans left to right, looking for ON→OFF transitions:
+- Hour 47: transition ON→OFF detected.  Are the next 6 hours (47–52) all OFF?  No — hours 49–51 are ON.  → Force hours 47–52 to OFF.
+- Hour 53: transition ON→OFF detected.  Are the next 6 hours (53–58) all OFF?  No — hours 55–58 are ON.  → Force hours 53–58 to OFF.</p>
+<pre><code>Hour:   44  45  46  47  48  49  50  51  52  53  54  55  56  57  58
+State:  ON  ON  ON  OFF OFF OFF OFF OFF OFF OFF OFF OFF OFF OFF OFF
+                    ^^^^^^^^^^^^^^^^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                    Extended by Pass 1   Extended by Pass 1
+</code></pre>
+<p>But now a new problem has appeared: hours 44–46 are ON and hour 47 is OFF — that transition already existed, so it is fine.  However, if the extended OFF region at hour 52 had pushed into another nearby ON period, a new ON→OFF transition could appear that also needs a 6-hour cooldown.</p>
+<p><strong>Pass 2</strong> — Scans again.  In this example, the hour-46→47 transition still has 12 consecutive OFF hours after it (47–58), so no further changes are needed.  But in more complex schedules with many short outages close together, Pass 1's extensions can create new short gaps that Pass 2 must fix.</p>
+<p><strong>Pass 3</strong> — A final safety pass to catch any remaining cascades from Pass 2's changes.  In practice, 3 passes are always sufficient because each pass can only extend OFF periods (never shorten them), so the process converges quickly.</p>
 <p><strong>Step 5 — Print a summary.</strong></p>
 <p>After Phase 1, the code prints how many hours each block is ON:</p>
 <pre><code>Phase 1 block A: 6200 ON / 6552 total (6400 avail, 152 unavail = 98% availability)
