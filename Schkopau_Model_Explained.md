@@ -1229,10 +1229,82 @@ for each variable v in the model:                  <span class="c1"># e.g. v = o
 
 **Two things happen simultaneously:**
 
-- **Fixing** (`vd.fix(...)`) locks the variable at its MILP solution value.  The solver can no longer change it.
-- **Domain relaxation** (`vd.domain = NonNegativeReals`) tells Pyomo the variable is now continuous, not binary.  Without this, MOSEK would still treat the problem as a MILP and refuse to compute duals.
+- **Locking** (`vd.fix(...)`) — the variable is pinned to its MILP answer.  The solver must keep it exactly at 0 or 1 and cannot touch it.
+- **Relabelling** (`vd.domain = NonNegativeReals`) — the variable is reclassified from *binary* to *continuous*.  This tells MOSEK: "there are no more yes/no decisions left in this model — please treat it as a plain number problem and give me sensitivity prices."
 
-**Both** are required.  Fixing without domain relaxation → still MILP, no duals.  Domain relaxation without fixing → the solver could choose fractional on/off values (e.g. 0.73), which is physically meaningless.
+**A plain-English analogy:**
+
+Imagine the shift manager has just finished deciding which power plant blocks run in which hours of the month — Block A is on from midnight to noon, Block B is off for maintenance, and so on.  The schedule is written on a control-room whiteboard as a column of ON/OFF switches, one per hour.
+
+Now the commercial team asks: *"If our coal delivery increased by 1 000 tonnes next month, how much extra profit could we make by generating more power?"*
+
+To answer that question, the commercial team does two things:
+1. **Put a lock on every switch** — they tape over each one with a label: "Block A hour 1500: RUNNING — do not touch."  This is the *lock* step (`vd.fix`).  The switch cannot be flipped; the schedule is frozen.
+2. **Reclassify each switch as a dial** — instead of an ON/OFF toggle, it is now a dial reading either 0.0 or 1.0.  The reading is the same, but the type of instrument has changed.  This is the *relabel* step (`vd.domain = NonNegativeReals`).
+
+Once every switch has been replaced by a locked dial, the commercial analyst (MOSEK) can calculate exactly how much profit changes if the coal limit is nudged — because dials respond smoothly to small nudges, and switches do not.  The on/off schedule itself never changes; only the power levels (how many MW each running block produces) are adjusted in response to the extra coal.
+
+**Concrete example — variable `on[A, 1500]` (Block A, hour 1500):**
+
+Suppose the MILP found Block A was ON at hour 1500.
+
+```
+# Before fix-and-relax:
+on[A, 1500].type    = Binary          # it is a YES/NO switch — only 0 or 1 allowed
+on[A, 1500].value   = 1               # MILP decided: Block A is ON at hour 1500
+on[A, 1500].locked  = No              # the solver is still allowed to flip this
+
+# Step 1 — vd.fix(1):
+on[A, 1500].locked  = YES             # pinned to 1; solver cannot move it
+
+# Step 2 — vd.domain = NonNegativeReals:
+on[A, 1500].type    = Number ≥ 0      # reclassified: no longer a YES/NO switch
+                                       # value is still 1.0, and still locked — it just
+                                       # looks like a number now, not a binary decision
+```
+
+After both steps, MOSEK sees a model with zero yes/no switches remaining.  All variables are plain numbers.  It switches into LP mode and can return shadow prices.
+
+**What breaks when only one step is applied:**
+
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Step 1: Lock value</th>
+<th>Step 2: Relabel as number</th>
+<th>Outcome</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Both ✓</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>Pure number problem — MOSEK returns shadow prices ✓</td>
+</tr>
+<tr>
+<td>Lock only</td>
+<td>Yes</td>
+<td>No</td>
+<td>Switch is locked but still labelled YES/NO — MOSEK still sees a MILP and <strong>refuses to return shadow prices</strong></td>
+</tr>
+<tr>
+<td>Relabel only</td>
+<td>No</td>
+<td>Yes</td>
+<td>Labelled as a number but free to move — MOSEK might set <code>on[A,1500] = 0.73</code>, meaning Block A is "73% on", which is <strong>physically impossible</strong></td>
+</tr>
+<tr>
+<td>Neither</td>
+<td>No</td>
+<td>No</td>
+<td>Original MILP unchanged — no shadow prices</td>
+</tr>
+</tbody>
+</table>
+
+**Why MOSEK can't give shadow prices when switches remain:** A shadow price answers: "If the coal limit goes up by 1 tonne, how much more profit can I make?"  For a number variable (power level), a tiny change in the limit causes a smooth, proportional change in the answer — easy to calculate.  For a YES/NO switch, there is no such smooth change: Block A is either on or off, and no fractional state exists.  MOSEK therefore refuses to calculate shadow prices whenever any yes/no switch is still present in the model.
 
 After this loop, the entire model has become a **pure LP** with the same on/off schedule as the MILP solution.
 
