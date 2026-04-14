@@ -192,7 +192,20 @@ def _compute_pnl(df: pd.DataFrame, cost_meta: dict) -> pd.DataFrame:
             P_eff_b = P_b + _dow_vals * (on_b - _both_on)
         df[f"P_eff_{b}"] = P_eff_b
 
-        rc = df[f"cost_slope_{b}"] * P_eff_b + df[f"cost_fixed_{b}"] * on_b
+        _cs = df[f"cost_slope_{b}"]
+        _cf = df[f"cost_fixed_{b}"]
+        rc = _cs * P_eff_b + _cf * on_b
+
+        # DUO cost adjustment: when both blocks ON, use DUO cost curves
+        _cs_duo_col = f"cost_slope_duo_{b}"
+        if cost_meta.get("has_duo", False) and _cs_duo_col in df.columns:
+            _cs_duo = pd.to_numeric(df[_cs_duo_col], errors="coerce").fillna(0.0)
+            _cf_duo = pd.to_numeric(df[f"cost_fixed_duo_{b}"], errors="coerce").fillna(0.0)
+            _both = 1
+            for _bb in cfg.BLOCKS:
+                _both = _both * df[f"on_model_{_bb}"]
+            rc += (_cs_duo - _cs) * P_eff_b * _both + (_cf_duo - _cf) * _both
+
         df[f"run_costs_{b}"] = rc
         total_run_costs += rc
 
@@ -241,6 +254,25 @@ def _compute_pnl(df: pd.DataFrame, cost_meta: dict) -> pd.DataFrame:
         - df["start_cost"]
         - df["OFF_costs"]
     )
+
+    # DUO diagnostic columns
+    _both_all = 1
+    for b in cfg.BLOCKS:
+        _both_all = _both_all * df[f"on_model_{b}"]
+    df["DUO_parameters_used"] = _both_all.astype(int) if cost_meta.get("has_duo", False) else 0
+
+    for b in cfg.BLOCKS:
+        tc_pmin_mono = df.get(f"TC_PminN_{b}", 0.0)
+        tc_pmax_mono = df.get(f"TC_Pmax_{b}", 0.0)
+        tc_pmin_duo_col = f"TC_PminN_duo_{b}"
+        tc_pmax_duo_col = f"TC_Pmax_duo_{b}"
+        if cost_meta.get("has_duo", False) and tc_pmin_duo_col in df.columns:
+            duo_flag = df["DUO_parameters_used"]
+            df[f"TC_PminN_eff_{b}"] = tc_pmin_mono * (1 - duo_flag) + pd.to_numeric(df[tc_pmin_duo_col], errors="coerce").fillna(0.0) * duo_flag
+            df[f"TC_Pmax_eff_{b}"] = tc_pmax_mono * (1 - duo_flag) + pd.to_numeric(df[tc_pmax_duo_col], errors="coerce").fillna(0.0) * duo_flag
+        else:
+            df[f"TC_PminN_eff_{b}"] = tc_pmin_mono
+            df[f"TC_Pmax_eff_{b}"] = tc_pmax_mono
 
     # Per-block PnL (spot revenue - run costs - start costs; OFF_costs/DOW are plant-level)
     for b in cfg.BLOCKS:

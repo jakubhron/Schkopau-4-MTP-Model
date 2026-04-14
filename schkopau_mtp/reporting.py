@@ -91,7 +91,10 @@ def write_excel(
         _internal_cols = [
             f"{prefix}_{b}"
             for prefix in ("cost_slope", "cost_fixed", "TC_PminN", "TC_Pmax",
-                           "coal_slope", "coal_fixed")
+                           "coal_slope", "coal_fixed",
+                           "cost_slope_duo", "cost_fixed_duo",
+                           "coal_slope_duo", "coal_fixed_duo",
+                           "TC_PminN_duo", "TC_Pmax_duo")
             for b in cfg.BLOCKS
         ]
         df_out = df_out.drop(columns=[c for c in _internal_cols if c in df_out.columns])
@@ -221,7 +224,8 @@ def _prepare_monthly_columns(
     df_m["on"] = (df_m["on"] * (1 - _unavail_report)).astype(int)
 
     P_val = pd.to_numeric(df_m.get("P", 0.0), errors="coerce").fillna(0.0)
-    df_m["P_eff"] = P_val
+    if "P_eff" not in df_m.columns or df_m["P_eff"].abs().sum() < 1e-9:
+        df_m["P_eff"] = P_val
 
     P_eff_num = pd.to_numeric(df_m.get("P_eff", 0.0), errors="coerce").fillna(0.0)
 
@@ -338,6 +342,16 @@ def _prepare_monthly_columns(
         _cs = pd.to_numeric(df_m.get(f"cost_slope_{_b}", 0.0), errors="coerce").fillna(0.0)
         _cf = pd.to_numeric(df_m.get(f"cost_fixed_{_b}", 0.0), errors="coerce").fillna(0.0)
         _rc_acc += _cs * _peff_b + _cf * _on_b
+
+        # DUO cost adjustment: Δslope × P_eff_duo + Δfixed × both_on
+        _cs_duo = pd.to_numeric(df_m.get(f"cost_slope_duo_{_b}", None), errors="coerce")
+        if _cs_duo is not None and _cs_duo.abs().sum() > 0:
+            _cf_duo = pd.to_numeric(df_m.get(f"cost_fixed_duo_{_b}", 0.0), errors="coerce").fillna(0.0)
+            _both = 1
+            for _bb in cfg.BLOCKS:
+                _both = _both * pd.to_numeric(df_m.get(f"on_model_{_bb}", 0), errors="coerce").fillna(0.0)
+            _peff_duo_b = _peff_b * _both
+            _rc_acc += (_cs_duo - _cs) * _peff_duo_b + (_cf_duo - _cf) * _both
 
     # Use single-block factor columns for per-block view (reporting display)
     if block:

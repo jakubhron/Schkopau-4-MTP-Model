@@ -37,6 +37,9 @@ def create_solver():
         solver.options["MSK_IPAR_MIO_CONSTRUCT_SOL"] = "MSK_ON"
         # Tuning: different seed explores different B&B paths
         solver.options["MSK_IPAR_MIO_SEED"] = "7"
+        # Workaround for MOSEK 11.1.6 simplex assertion crash (moseksimng.c:3839):
+        # force interior-point for root relaxation only; nodes keep fast simplex.
+        solver.options["MSK_IPAR_MIO_ROOT_OPTIMIZER"] = "MSK_OPTIMIZER_INTPNT"
     else:
         solver = SolverFactory("highs")
         solver.options["mip_rel_gap"] = float(cfg.MOSEK_MIO_TOL_REL_GAP)

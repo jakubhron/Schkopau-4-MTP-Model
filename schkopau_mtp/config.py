@@ -22,7 +22,7 @@ VERSION = "Schkopau_base_01"
 #                   FILE PATHS
 # ============================================================
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-INPUT_FOLDER = "Inputs_EOD_31_03_2026"
+INPUT_FOLDER = "Inputs_EOD_13_04_2026"
 
 
 def _find_input_file(folder: str) -> str:
@@ -59,7 +59,7 @@ OUTPUT_FILE = os.path.join(os.path.dirname(INPUT_FILE), f"{_input_stem}_results_
 # ============================================================
 #                   DATE RANGE
 # ============================================================
-START_DATE = pd.Timestamp("2026-04-08 00:00")
+START_DATE = pd.Timestamp("2026-04-14 00:00")
 END_DATE = pd.Timestamp("2026-12-31 23:00")
 
 # ============================================================
@@ -74,7 +74,7 @@ SKIP_SOLVE_AND_EXTRACT = False
 #                   SOLVER SETTINGS
 # ============================================================
 USE_MOSEK = True
-MOSEK_MIO_TOL_REL_GAP = "0.03"    # 1 % MIP gap
+MOSEK_MIO_TOL_REL_GAP = "0.04"    # 4 % MIP gap
 MOSEK_MIO_MAX_TIME = "600"         # max 10 minutes
 
 # ============================================================
@@ -87,7 +87,7 @@ DUAL_BLOCK_BOOST = 5.0    # Pmin/Pmax increase when both blocks online [MW]
 BIG_M = 500              # tight Big-M (≥ Pmax + boost ≈ 445 MW)
 MIN_UP = 8              # min-up time [h]
 MIN_DOWN = 6            # min-down time [h]
-START_MARGIN_MIN = 0         # minimum margin hurdle / start [EUR]
+START_MARGIN_MIN = 22000     # minimum margin hurdle / start [EUR]
 INITIAL_ON = {"A": 0, "B": 1}  # initial unit commitment state per block
 MAX_RAMP_HOURS = 4       # maximum startup ramp duration [h]
 USE_SIMPLE_STARTUP_RAMP = False # detailed startup ramp mode (simple mode used in staged Stage 1 only)
@@ -97,19 +97,19 @@ USE_STAGED_RAMP_WARMSTART = True   # Stage 1 simple ramp, Stage 2 full ramp with
 # ============================================================
 #                   ECONOMIC PARAMETERS
 # ============================================================
-OWN_CONSUMPTION = 10.0   # house power [MW]
+OWN_CONSUMPTION = 12.0   # house power [MW]
 DEFAULT_GRIDFEE = 23.6   # fallback grid fee [EUR/MWh]
-OFFLINE_FIXED_PENALTY_NO_DOW = 3420.0  # [EUR/h] fixed plant-off penalty when USE_DOW_OPPORTUNITY_COSTS=False
+OFFLINE_FIXED_PENALTY_NO_DOW = 3420  # [EUR/h] fixed plant-off penalty when USE_DOW_OPPORTUNITY_COSTS=False
 
 # ============================================================
 #                   DOW OPPORTUNITY COSTS
 # ============================================================
-USE_DOW_OPPORTUNITY_COSTS = False   # True: include DOW running costs + DOW revenue in PnL
+USE_DOW_OPPORTUNITY_COSTS = True  # True: include DOW running costs + DOW revenue in PnL
                                    # False: exclude both DOW running costs and DOW revenue
 DOW_OPPORTUNITY_REVENUE = 188.0    # [EUR/MW DOW] — extra revenue per MW DOW (only when USE_DOW_OPPORTUNITY_COSTS=True)
 DOW_OFF_CONSUMPTION = 130.0        # [MW] — extra grid consumption from DOW when both blocks offline
 DOW_OFF_COMPENSATION = 6.9         # [EUR/MWh] — DOW compensation reducing grid cost on DOW portion
-OFFLINE_FIXED_PENALTY_NO_DOW = 3420.0  # [EUR/h] fixed plant-off penalty when USE_DOW_OPPORTUNITY_COSTS=False
+
 
 # ============================================================
 #                   MONTHLY LAYOUT (for Excel reporting)

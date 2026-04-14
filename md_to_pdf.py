@@ -7,7 +7,10 @@ Opens the rendered HTML in the default browser.
 Use the browser's Print → Save as PDF (Ctrl+P) to produce the final PDF.
 """
 
-import pathlib, webbrowser, markdown
+import pathlib, webbrowser, markdown, re
+
+# Toggle: True = green-highlighted new sections; False = normal colours throughout.
+HIGHLIGHT_MODE = False
 
 MD_FILE = pathlib.Path(__file__).with_name("Schkopau_Model_Explained.md")
 OUT_FILE = MD_FILE.with_suffix(".html")
@@ -115,6 +118,11 @@ html_doc = f"""\
         text-align: left;
         font-weight: 600;
     }}
+    th code {{
+        background: none;
+        color: white;
+        padding: 0;
+    }}
     td {{
         padding: 5px 10px;
         border-bottom: 1px solid #ddd;
@@ -213,6 +221,15 @@ html_doc = f"""\
 </body>
 </html>
 """
+
+# --- Post-process: handle <!-- NEW_START --> / <!-- NEW_END --> markers ---
+if HIGHLIGHT_MODE:
+    html_doc = html_doc.replace(
+        "<!-- NEW_START -->",
+        '<div style="border-left:4px solid #16a34a; background:#f0fdf4; padding:8px 16px; margin:16px 0;">'
+    ).replace("<!-- NEW_END -->", "</div>")
+else:
+    html_doc = re.sub(r"<!--\s*NEW_(?:START|END)\s*-->", "", html_doc)
 
 OUT_FILE.write_text(html_doc, encoding="utf-8")
 print(f"Written: {OUT_FILE}")

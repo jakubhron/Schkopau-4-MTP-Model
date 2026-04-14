@@ -45,6 +45,8 @@ def load_and_prepare() -> Tuple[pd.DataFrame, dict]:
     df = _add_season_and_dow(df)
     df, cost_meta = _compute_cost_curves(df)
     df = _compute_coal_curves(df)
+    df, duo_meta = _read_duo_tabs(df)
+    cost_meta.update(duo_meta)
     starts_data = _read_starts_tab()
     coal_limits = _read_coal_constrains_tab() if cfg.USE_COAL_CONSTRAINS else {}
 
@@ -253,6 +255,80 @@ def _compute_coal_curves(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ====================================================================
+#  DUO tabs – dual-block cost / coal parameters
+# ====================================================================
+
+
+def _read_duo_tabs(df: pd.DataFrame) -> Tuple[pd.DataFrame, dict]:
+    """Read Block_A_DUO / Block_B_DUO tabs and compute DUO cost & coal curves.
+
+    DUO parameters apply when both blocks run simultaneously.  The tabs
+    have the same column layout as Block_A / Block_B.
+
+    Returns the enriched DataFrame and a dict ``{"has_duo": True/False}``.
+    """
+    import shutil, tempfile
+
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".xlsx")
+    os.close(tmp_fd)
+    shutil.copy2(cfg.INPUT_FILE, tmp_path)
+
+    duo_dfs: dict = {}
+    try:
+        for block in cfg.BLOCKS:
+            sheet = f"Block_{block}_DUO"
+            try:
+                duo_dfs[block] = pd.read_excel(tmp_path, sheet_name=sheet)
+            except ValueError:
+                pass  # tab doesn't exist
+    finally:
+        os.unlink(tmp_path)
+
+    if not duo_dfs:
+        return df, {"has_duo": False}
+
+    # Merge DUO block-specific columns with _DUO suffix
+    for block, bdf in duo_dfs.items():
+        # Filter to same date range as df
+        if "Date" in bdf.columns:
+            bdf = bdf[bdf["Date"].between(cfg.START_DATE, cfg.END_DATE)].reset_index(drop=True)
+            bdf = bdf.iloc[: len(df)]  # align length
+
+        for col in bdf.columns:
+            if _is_block_col(col):
+                df[f"{col}_DUO_{block}"] = bdf[col].values[: len(df)]
+
+    # Compute DUO cost curves for each block that has a DUO tab
+    for b in duo_dfs:
+        pmin = df[f"Pmin_{b}"]
+        pmax = df[f"Pmax_{b}"]
+
+        tc_pmin_duo = _find_col(df, "total generation costs at pmin", f"DUO_{b}")
+        tc_pmax_duo = _find_col(df, "total generation costs at pmax", f"DUO_{b}")
+        df[f"TC_PminN_duo_{b}"] = tc_pmin_duo
+        df[f"TC_Pmax_duo_{b}"] = tc_pmax_duo
+
+        Cmin = tc_pmin_duo * pmin
+        Cmax = tc_pmax_duo * pmax
+        denom = (pmax - pmin).replace(0.0, np.nan)
+        df[f"cost_slope_duo_{b}"] = ((Cmax - Cmin) / denom).fillna(0.0)
+        df[f"cost_fixed_duo_{b}"] = Cmin - df[f"cost_slope_duo_{b}"] * pmin
+
+        # DUO coal curves
+        coal_pmin_duo = _find_col(df, "coal conversion factor at pmin", f"DUO_{b}")
+        coal_pmax_duo = _find_col(df, "coal conversion factor at pmax", f"DUO_{b}")
+
+        C_coal_min = coal_pmin_duo * pmin
+        C_coal_max = coal_pmax_duo * pmax
+        df[f"coal_slope_duo_{b}"] = ((C_coal_max - C_coal_min) / denom).fillna(0.0)
+        df[f"coal_fixed_duo_{b}"] = C_coal_min - df[f"coal_slope_duo_{b}"] * pmin
+
+    blocks_loaded = sorted(duo_dfs.keys())
+    print(f"--- DUO tabs loaded for blocks: {', '.join(blocks_loaded)}")
+    return df, {"has_duo": True, "duo_blocks": blocks_loaded}
+
+
+# ====================================================================
 #  Coal constraints tab – monthly coal volume limits
 # ====================================================================
 
@@ -302,8 +378,12 @@ def _read_coal_constrains_tab() -> dict:
             except ValueError:
                 month = pd.to_datetime(str(raw_month), format="%B").month
         limit_kt = float(row[2]) if row[2] is not None else None
+        dow_kt = float(row[3]) if len(row) > 3 and row[3] is not None else 0.0
         if limit_kt is not None:
-            limits[(year, month)] = limit_kt
+            if cfg.USE_DOW_OPPORTUNITY_COSTS:
+                limits[(year, month)] = limit_kt + dow_kt
+            else:
+                limits[(year, month)] = limit_kt
 
     if limits:
         print(f"--- Coal constraints loaded: {len(limits)} months")

@@ -134,7 +134,7 @@ $$C_{\max} = 84.85 \times 433.7 = 36\,800 \text{ EUR/h}$$
 
 **Step 2 — Linearise:**
 
-$$\text{cost\_slope} = \frac{36\,800 - 13\,840}{433.7 - 155} = \frac{22\,960}{278.7} = 82.38 \text{ EUR/MW}$$
+$$\text{cost\_slope} = \frac{36\,800 - 13\,840}{433.7 - 155} = \frac{22\,960}{278.7} = 82.38 \text{ EUR/MWh}$$
 
 $$\text{cost\_fixed} = 13\,840 - 82.38 \times 155 = 1\,071 \text{ EUR/h}$$
 
@@ -163,6 +163,35 @@ $$\text{coal\_fixed} = 151.9 - 0.902 \times 155 = 12.1 \text{ t/h}$$
 At P_eff = 327 MW: coal = $0.902 \times 327 + 12.1 = 307.0$ tonnes/hour.
 
 The same linearisation is applied to coal consumption (from Coal conversion factor at Pmin to Coal conversion factor at Pmax).
+
+### 2.1b  Block_A_DUO / Block_B_DUO tabs (optional)
+
+When both blocks operate simultaneously, they share steam infrastructure, resulting in slightly different thermal efficiency compared to solo operation.  The optional **Block_A_DUO** and **Block_B_DUO** tabs capture this effect by providing block-specific cost parameters that apply *only when both blocks are running at the same time*.
+
+The DUO tabs have the same column structure as the regular Block_A and Block_B tabs (same rows, same column names — see Section 2.1 for the full column list).  In practice **only the two cost columns** carry distinct values:
+
+| Column | DUO note |
+|--------|----------|
+| **Total generation costs at Pmin [€/MWh]** | DUO-mode TC at minimum load — typically lower than solo due to shared boiler efficiency |
+| **Total generation costs at Pmax [€/MWh]** | DUO-mode TC at maximum load — typically lower than solo |
+
+All other columns (Pmin, Pmax, unavailability, DOW, grid fee, …) are read only from the primary tabs — the DUO tabs do not repeat them.
+
+**Fallback behaviour:** If a DUO tab is absent (or contains only zeros), the model automatically uses the solo parameters for that block, so the DUO tabs are entirely optional and backward-compatible.
+
+#### Mono vs. DUO efficiency comparison
+
+The table below illustrates how DUO parameters differ from solo (Mono) parameters.  Cost rates are lower in DUO mode because shared steam infrastructure improves overall thermal efficiency when both boilers fire together.
+
+| Parameter | Block A — Mono | Block A — DUO | Block B — Mono | Block B — DUO |
+|-----------|----------------|---------------|----------------|---------------|
+| TC at Pmin [EUR/MWh] | 89.29 | ~87.5 | 103.23 | ~101.5 |
+| TC at Pmax [EUR/MWh] | 84.85 | ~83.4 | 86.30 | ~84.9 |
+| Implied `cost_slope` [EUR/MWh] | 82.38 | ~80.4 | 78.24 | ~76.5 |
+
+> **Note:** Exact DUO values vary by hour (they track the same seasonal fuel and CO₂ price patterns as the solo tabs).  The values shown are approximate averages for illustration; actual hourly values are read from the `Block_A_DUO` / `Block_B_DUO` sheets.
+
+The difference in cost rates feeds into the DUO cost mechanism described in Section 3.2b.  Across ~3 000 dual-block hours in a typical optimisation horizon, even a modest difference of 1–2 EUR/MWh between Mono and DUO parameters translates to **+2 million EUR** improvement in total PnL.
 
 ### 2.2  Starts tab (start-up tiers)
 
@@ -214,6 +243,8 @@ plus a separate DOW coal allocation:
 
 These limits are the binding scarcity constraint in most scenarios (see Sections 5–6).
 
+**How the loader computes the effective limit:**  The data loader sums **Remaining + DOW** from columns C and D when `USE_DOW_OPPORTUNITY_COSTS = True`, because $P_{\text{eff}}$ includes DOW steam and coal consumption is computed on P_eff.  When `USE_DOW_OPPORTUNITY_COSTS = False`, only the **Remaining** column is used, since P_eff = P (electrical output only) and the DOW-related coal is not modelled.
+
 ---
 
 ## 3. Model Formulation: Variables, Objective, and Constraints
@@ -233,6 +264,7 @@ For **every hour $t$** and **every block $b$**, the model determines:
 | $\text{cold\_start}_{b,t}$ | **Binary** | Is this startup a *cold* start (60–100 hours offline)? | Cold starts (moderate-length downtime) cost more than warm starts because equipment has cooled down. Binary variable identifies when this higher-cost tier applies and triggers the appropriate startup ramp profile. |
 | $\text{vcold\_start}_{b,t}$ | **Binary** | Is this startup a *very-cold* start (≥100 hours offline)? | Very cold starts (long downtime) are the most expensive and slowest to ramp up. Binary variable identifies this highest-cost tier and enforces the longest ramp-up sequence. |
 | $\text{both\_on}_t$ | **Continuous** [0,1] | Are **both** blocks on at once? | When both blocks run simultaneously, special rules apply (power boost constraint, DOW steam allocation). Continuous variable is forced to behave as binary through constraints — equals 1 only when both blocks are running. |
+| $P_{\text{eff\_duo},b,t}$ | **Continuous** (MW) | Effective power attributed to dual-block operation | Equals $P_{\text{eff}}$ when both blocks run, 0 otherwise. Linearised product of $P_{\text{eff}} \times \text{both\_on}$ via McCormick envelope. Used to blend Mono/DUO cost slopes without bilinear terms (Section 3.2b). |
 | $\text{plant\_off}_t$ | **Continuous** [0,1] | Are **both** blocks off (entire plant dark)? | When the entire plant is offline, we still consume a small amount of house power and pay grid fees. Continuous variable (constrained to binary behavior) tracks when this cost applies. |
 
 **Note on variable types:** Binary variables can only be 0 or 1 (yes/no decisions). Continuous variables can take any value in a range. Some continuous variables (shutdown, both_on, plant_off) are constrained by the model's mathematical rules to only ever equal 0 or 1 in practice, making them "implied binary." This speeds up the solver by reducing the number of explicit on/off decisions it must track.
@@ -249,7 +281,7 @@ $$P_{\text{eff},A,t} = P_{A,t} + \text{DOW}_t \times \text{on}_{A,t}$$
 
 $$P_{\text{eff},B,t} = P_{B,t} + \text{DOW}_t \times (\text{on}_{B,t} - \text{both\_on}_t)$$
 
-$P_{\text{eff}}$ is the *total thermal-equivalent load on the boiler* (electrical output plus steam).  It is this effective power that determines fuel consumption and running costs.  DOW revenues are computed as $\text{DOW\_OPPORTUNITY\_REVENUE} \times \text{DOW}$ (188 EUR/MW × DOW load in MW) and credited whenever at least one block is running.
+$P_{\text{eff}}$ is the *total thermal-equivalent load on the boiler* (electrical output plus steam).  It is this effective power that determines fuel consumption and running costs.  DOW revenues are computed as $\text{DOW\_OPPORTUNITY\_REVENUE} \times \text{DOW}$ (188 EUR/MWh × DOW load in MW) and credited whenever at least one block is running.
 
 **When `USE_DOW_OPPORTUNITY_COSTS = False` (DOW OFF):**
 
@@ -271,6 +303,144 @@ This gives a total offline cost per hour of roughly **3 420 EUR** (fixed penalty
 DOW is **still deducted from the power upper bound** (Pmax) in both modes, because the physical capacity reserved for steam extraction is a hard constraint regardless of the accounting treatment.  The block's maximum *electrical* output is always $P_{\max} - \text{DOW}$.
 
 This two-mode design lets the model produce results aligned with the KYOS benchmark (DOW OFF) while also supporting full DOW opportunity-cost analysis (DOW ON).
+
+### 3.2b  DUO cost mechanism
+
+When both blocks run simultaneously, a different set of fuel and CO₂ parameters applies — captured in the `Block_A_DUO` / `Block_B_DUO` input tabs (Section 2.1b).  This section explains how the model switches between **Mono** (solo) and **DUO** cost parameters using only linear constraints and the new `P_eff_duo` variable.
+
+#### The problem: a bilinear product
+
+The natural way to express the DUO cost would be a conditional:
+
+```
+if both_on:
+    run_cost = cost_slope_duo × P_eff + cost_fixed_duo × on   # DUO rate
+else:
+    run_cost = cost_slope × P_eff + cost_fixed × on           # Mono rate
+```
+
+This is equivalent to multiplying the continuous variable $P_{\text{eff}}$ by the binary indicator `both_on` — a **bilinear product** that cannot appear directly in a linear programme.
+
+#### The solution: McCormick linearisation
+
+**The core idea in plain English.**  Imagine you are adding two different price tags to a product.  When Block A runs alone, the fuel rate is 82.38 EUR/MWh.  When both blocks run together (the DUO mode), the shared boiler infrastructure makes it slightly cheaper: 80.18 EUR/MWh.
+
+The model needs to charge the right rate in each hour.  In code you would write:
+
+```python
+if both_on:
+    run_cost = 80.18 * P_eff       # DUO rate
+else:
+    run_cost = 82.38 * P_eff       # Mono rate
+```
+
+But a linear solver has no `if` statements — it can only do additions, subtractions, and multiplications by fixed numbers, not by other variables.
+
+The trick is to rewrite the conditional as a single formula:
+
+$$\text{run\_cost} = 82.38 \times P_{\text{eff}} + (-2.20) \times \underbrace{P_{\text{eff}} \times \text{both\_on}}_{= w}$$
+
+- When `both_on = 1`: $w = P_{\text{eff}}$, so the rate becomes $82.38 - 2.20 = 80.18$ EUR/MWh (DUO). ✓
+- When `both_on = 0`: $w = 0$, so the full Mono rate 82.38 EUR/MWh stays. ✓
+
+The only obstacle: $w = P_{\text{eff}} \times \text{both\_on}$ is still a product of two variables — a bilinear term that is nonlinear and breaks the LP solver.  We need to replace $w$ with an auxiliary variable plus a set of linear inequalities that force $w$ to always equal $P_{\text{eff}} \times \text{both\_on}$ at any valid solution.
+
+#### How McCormick fences in the product
+
+McCormick (1976) proved that for $w = x \cdot y$ with $x \in [x_L, x_U]$ and $y \in [y_L, y_U]$, four linear inequalities form the tightest possible bounding box around all valid $(x, y, w)$ triples:
+
+$$w \ge x_L y + x y_L - x_L y_L \qquad \text{(MC1)}$$
+
+$$w \ge x_U y + x y_U - x_U y_U \qquad \text{(MC2)}$$
+
+$$w \le x_U y + x y_L - x_U y_L \qquad \text{(MC3)}$$
+
+$$w \le x y_U + x_L y - x_L y_U \qquad \text{(MC4)}$$
+
+Think of them as four walls of a fence that squeeze $w$ as close to the true product as possible — linearly.
+
+#### Substituting the Schkopau values
+
+Here $x = P_{\text{eff}} \in [0, P_{\max,\text{eff}}]$ and $y = \text{both\_on} \in \{0, 1\}$, so $x_L = 0$, $x_U = P_{\max,\text{eff}} = 433.7$ MW, $y_L = 0$, $y_U = 1$.  Plugging into MC1–MC4:
+
+| Fence wall | Substitution | Simplifies to |
+|------------|-------------|---------------|
+| MC1 | $w \ge 0 \cdot y + x \cdot 0 - 0 = 0$ | $w \ge 0$ — already guaranteed by the variable lower bound; no new constraint needed |
+| MC2 | $w \ge 433.7 \cdot y + x \cdot 1 - 433.7 \cdot 1$ | $P_{\text{eff\_duo}} \ge P_{\text{eff}} - 433.7 \times (1 - \text{both\_on})$ |
+| MC3 | $w \le 433.7 \cdot y + x \cdot 0 - 0$ | $P_{\text{eff\_duo}} \le 433.7 \times \text{both\_on}$ |
+| MC4 | $w \le x \cdot 1 + 0 \cdot y - 0$ | $P_{\text{eff\_duo}} \le P_{\text{eff}}$ |
+
+**Three active constraints** — those are exactly the three constraint rules in the Pyomo model.
+
+#### Checking that the fence forces the right value
+
+Apply all three constraints for each case:
+
+**Case: `both_on = 0`** (Block B is off — only Block A runs alone).  Example: Block A at $P_{\text{eff}} = 327$ MW.
+
+| Constraint | Evaluates to | Says |
+|-----------|-------------|------|
+| MC2: $w \ge 327 - 433.7 \times (1 - 0)$ | $w \ge -106.7$ | lower bound below 0, so effectively $w \ge 0$ |
+| MC3: $w \le 433.7 \times 0$ | $w \le 0$ | upper bound is zero |
+| MC4: $w \le 327$ | $w \le 327$ | weaker than MC3 here |
+| variable lb | $w \ge 0$ | lower bound is zero |
+
+Result: $0 \le w \le 0$, so $P_{\text{eff\_duo}} = 0$.  The DUO adjustment is switched off. ✓
+
+**Case: `both_on = 1`** (both blocks on).  Example: Block A at $P_{\text{eff}} = 327$ MW, Block B also on.
+
+| Constraint | Evaluates to | Says |
+|-----------|-------------|------|
+| MC2: $w \ge 327 - 433.7 \times (1 - 1)$ | $w \ge 327$ | lower bound is 327 MW |
+| MC3: $w \le 433.7 \times 1$ | $w \le 433.7$ | non-binding |
+| MC4: $w \le 327$ | $w \le 327$ | upper bound is 327 MW |
+
+Result: $327 \le w \le 327$, so $P_{\text{eff\_duo}} = 327 = P_{\text{eff}}$.  The DUO adjustment is fully active. ✓
+
+#### Why this works even inside the solver's search process
+
+During branch-and-bound, the LP relaxation at intermediate nodes can temporarily have `both_on = 0.4` (a fractional value — physically impossible, but the LP relaxation allows it).  In that case the three constraints leave $w$ in a range, not pinned to a single value.  This is fine — the McCormick fence is still the **tightest possible linear approximation**, so the LP gives MOSEK the best possible bound at every node.  Once MOSEK fixes `both_on` to 0 or 1 (which it must in the final solution), the fence collapses to a single point as shown above.  **No approximation error reaches the final answer.**
+
+#### Blended cost formula (DUO cost formula)
+
+The running-cost constraint uses Mono parameters as a base and adds the DUO delta proportional to `P_eff_duo`:
+
+$$\text{run\_costs}_{b,t} = \underbrace{\text{cost\_slope}^{\text{mono}} \times P_{\text{eff}} + \text{cost\_fixed}^{\text{mono}} \times \text{on}}_{\text{Mono base}} + \underbrace{\Delta\text{slope} \times P_{\text{eff\_duo}} + \Delta\text{fixed} \times \text{both\_on}}_{\text{DUO adjustment}}$$
+
+where:
+
+$$\Delta\text{slope}_{b,t} = \text{cost\_slope\_duo}_{b,t} - \text{cost\_slope}_{b,t}$$
+
+$$\Delta\text{fixed}_{b,t} = \text{cost\_fixed\_duo}_{b,t} - \text{cost\_fixed}_{b,t}$$
+
+**Verification — when `both_on = 1`** (so $P_{\text{eff\_duo}} = P_{\text{eff}}$ and `both_on = 1`):
+
+$$\text{run\_cost} = (\text{cost\_slope} + \Delta\text{slope}) \times P_{\text{eff}} + (\text{cost\_fixed} + \Delta\text{fixed}) \times \text{on} = \text{cost\_slope\_duo} \times P_{\text{eff}} + \text{cost\_fixed\_duo} \times \text{on}$$
+
+**Verification — when `both_on = 0`** (so $P_{\text{eff\_duo}} = 0$ and `both_on = 0`):
+
+$$\text{run\_cost} = \text{cost\_slope} \times P_{\text{eff}} + \text{cost\_fixed} \times \text{on}$$
+
+The formula cleanly selects Mono or DUO parameters depending on the operating mode — all within a single linear constraint.
+
+#### Worked example — Block A, winter hour, both blocks on
+
+Continuing the Block A example from Section 2.1 (TC_Pmin = 89.29, TC_Pmax = 84.85), assume the DUO tab provides TC_Pmin = 87.50 and TC_Pmax = 83.35 for the same hour:
+
+| Parameter | Mono | DUO | Delta |
+|-----------|-----:|----:|------:|
+| TC at Pmin [EUR/MWh] | 89.29 | 87.50 | −1.79 |
+| TC at Pmax [EUR/MWh] | 84.85 | 83.35 | −1.50 |
+| `cost_slope` [EUR/MWh] | 82.38 | 80.18 | Δslope = −2.20 |
+| `cost_fixed` [EUR/h] | 1 071 | 910 | Δfixed = −161 |
+
+With Block A dispatched at $P_{\text{eff}} = 327$ MW and both blocks on ($P_{\text{eff\_duo}} = 327$ MW):
+
+$$\text{run\_cost}_{\text{Mono}} = 82.38 \times 327 + 1\,071 \times 1 = 27\,909 \text{ EUR/h}$$
+
+$$\text{run\_cost}_{\text{DUO}} = 27\,909 + (-2.20) \times 327 + (-161) \times 1 = 27\,909 - 719 - 161 = 27\,029 \text{ EUR/h}$$
+
+The DUO parameters save approximately **880 EUR/h for Block A alone** in this example.  Summed across ~3 000 dual-block hours over the full horizon, the model recovers over **+2 million EUR** in PnL compared to using Mono parameters for all hours.
 
 ### 3.3  Objective function
 
@@ -299,7 +469,7 @@ The components are:
 
    Note: the **very hot** tier (off < 5 hours) cannot occur because the minimum down-time is 6 hours — the block physically cannot restart that quickly.
 
-   **`START_MARGIN_MIN`** is an optional additional hurdle (in EUR) added on top of every startup cost regardless of tier.  It is defined in the config file and currently set to **0 EUR**, meaning it has no effect.  If set to a positive value, it would make the model require that each startup generates at least that much extra profit to justify turning on — acting as a safety margin against marginal startups that barely break even.  Because it is multiplied by `startup` (not by a tier variable), it applies equally to all startup types.
+   **`START_MARGIN_MIN`** is an optional additional hurdle (in EUR) added on top of every startup cost regardless of tier.  It is defined in the config file and currently set to **22 000 EUR**.  It makes the model require that each startup generates at least that much extra profit to justify turning on — acting as a safety margin against marginal startups that barely break even.  Because it is multiplied by `startup` (not by a tier variable), it applies equally to all startup types.
 
 4. **OFF costs** — when the entire plant is offline, the model charges two components:
    - **House power**: the plant's own auxiliary consumption (10 MW) is charged at $(\text{Price} + \text{Grid fee})$ per MWh in both DOW modes.
@@ -311,7 +481,7 @@ The components are:
 ### 3.4  DOW opportunity costs
 
 When the plant is fully offline, the industrial DOW consumer switches to its own electric heating, drawing approximately 130 MW from the grid.  The model can be configured to account for this via the `USE_DOW_OPPORTUNITY_COSTS` flag:
-- **When enabled** (`True`): the 130 MW DOW backup is charged at the **grid fee only** (not the market price), and a partial compensation of 6.9 EUR/MWh is subtracted.  DOW revenues (188 EUR/MW × DOW) are credited when at least one block runs.  The 10 MW house power is always charged at Price + grid fee.
+- **When enabled** (`True`): the 130 MW DOW backup is charged at the **grid fee only** (not the market price), and a partial compensation of 6.9 EUR/MWh is subtracted.  DOW revenues (188 EUR/MWh × DOW) are credited when at least one block runs.  The 10 MW house power is always charged at Price + grid fee.
 - **When disabled** (`False`): OFF costs include the plant's 10 MW house power (at Price + grid fee) plus a **fixed offline penalty of 3 420 EUR/h** (`OFFLINE_FIXED_PENALTY_NO_DOW`).  The 130 MW DOW backup and DOW revenues are excluded.
 
 In both modes shutting down is significantly more expensive than it first appears, incentivising the solver to keep at least one block online.
@@ -527,7 +697,7 @@ For each month $(y, m)$ that has a limit in the Coal_constrains tab:
 
 $$\sum_{b \in \{A,B\}} \;\sum_{t \in \text{month}(y,m)} \bigl[\text{coal\_slope}_{b,t} \times P_{\text{eff},b,t} + \text{coal\_fixed}_{b,t} \times \text{on}_{b,t}\bigr] \;\le\; \text{Limit}_{y,m} \times 1000$$
 
-(The factor 1000 converts kilo-tonnes from the input into tonnes used by the model.)
+where $\text{Limit}_{y,m}$ is the sum of **Remaining + DOW** coal volumes from the input tab (when `USE_DOW_OPPORTUNITY_COSTS = True`), or **Remaining only** (when `False`).  The factor 1000 converts kilo-tonnes from the input into tonnes used by the model.  Because $P_{\text{eff}}$ already includes DOW steam load, the coal consumed for DOW steam production is naturally captured by the left-hand side — the limit must therefore include the DOW coal allocation to remain consistent.
 
 This single inequality ties together **every hour of a month across both blocks**.  The optimiser cannot treat hours independently – choosing to run at full power during one high-price hour leaves less coal budget for later hours.
 
@@ -666,37 +836,45 @@ For each (block, hour), it computes:
 both = 1 if (on_hint["A"][t] == 1 and on_hint["B"][t] == 1) else 0
 <span class="c2"># When both blocks run, the p_lower constraint forces P ≥ Pmin + 5 MW</span>
 boost = 5.0 * both
-<span class="c3"># DOW steam (27 MW) only adds to Block A when DOW accounting is on</span>
-dow = DOW[t] if (b == "A" and USE_DOW_OPPORTUNITY_COSTS) else 0.0
-<span class="c4"># Minimum effective load = electrical Pmin + dual-block boost + DOW steam</span>
+<span class="c3"># DOW steam handling: Block A always carries DOW; Block B carries DOW</span>
+<span class="c3"># only when Block A is OFF (DOW must go somewhere if plant is running)</span>
+if b == "A":  <span class="c4"># primary DOW block</span>
+    dow = DOW[t]
+else:  <span class="c4"># secondary block carries DOW only when primary is off</span>
+    dow = DOW[t] * (1 - both)
+<span class="c5"># Minimum effective load = electrical Pmin + dual-block boost + DOW steam</span>
 p_eff_min = Pmin[b, t] + boost + dow
-<span class="c5"># Coal burned per hour at this minimum load (linear formula from Section 2.1)</span>
+<span class="c6"># Coal burned per hour at this minimum load (linear formula from Section 2.1)</span>
 coal_rate = coal_slope[b, t] * p_eff_min + coal_fixed[b, t]
 </pre>
 
-#### Concrete example — coal rate for Block A, January hour 20
+#### Concrete examples — coal rate for Block A and Block B
 
-Using real Schkopau parameters where both blocks are ON and DOW accounting is enabled:
+**Case 1: Both blocks ON** — Using real Schkopau parameters where both blocks are ON and DOW accounting is enabled:
 
-| Parameter | Value | Source |
-|-----------|-------|--------|
-| Pmin (Block A) | 155 MW | Input column |
-| DOW (Warme) | 27 MW | Input column |
-| DUAL_BLOCK_BOOST | 5 MW | Config |
-| coal_slope | 0.902 t/MW | Linearised from coal conv. factors |
-| coal_fixed | 12.1 t/h | Linearised from coal conv. factors |
+| Parameter | Block A | Block B | Source |
+|-----------|---------|---------|--------|
+| Pmin | 155 MW | 155 MW | Input column |
+| DOW (Warme) | 27 MW | 0 MW (A carries it) | Input column |
+| DUAL_BLOCK_BOOST | 5 MW | 5 MW | Config |
+| coal_slope | 0.902 t/MW | 0.946 t/MW | Linearised |
+| coal_fixed | 12.1 t/h | 9.8 t/h | Linearised |
 
-Both blocks are ON, so `boost = 5`.  Block A carries the DOW steam:
+Block A: $p_{\text{eff,min}} = 155 + 5 + 27 = 187$ MW → coal = $0.902 \times 187 + 12.1 = 180.8$ t/h
 
-$$p_{\text{eff,min}} = 155 + 5 + 27 = 187 \text{ MW}$$
+Block B: $p_{\text{eff,min}} = 155 + 5 + 0 = 160$ MW → coal = $0.946 \times 160 + 9.8 = 161.2$ t/h
 
-$$\text{coal\_rate} = 0.902 \times 187 + 12.1 = 180.8 \text{ t/h}$$
+**Case 2: Only Block B ON** (Block A unavailable) — Block B now carries the DOW steam:
 
-For Block B in the same hour (no DOW):
+| Parameter | Block B | Source |
+|-----------|---------|--------|
+| Pmin | 155 MW | Input column |
+| DOW (Warme) | 27 MW (A is off → B carries it) | Input column |
+| DUAL_BLOCK_BOOST | 0 MW (solo) | Config |
 
-$$p_{\text{eff,min}} = 155 + 5 + 0 = 160 \text{ MW}$$
+Block B: $p_{\text{eff,min}} = 155 + 0 + 27 = 182$ MW → coal = $0.946 \times 182 + 9.8 = 182.0$ t/h
 
-$$\text{coal\_rate} = 0.946 \times 160 + 9.8 = 161.2 \text{ t/h}$$
+This is 21 t/h more than the both-ON case (161 t/h) because Block B must absorb the full DOW load alone.
 
 Both blocks together: **342 t/h** at minimum load.  Over 720 hours in a month, that would be 246 000 tonnes — well above most monthly limits (e.g. 111 kt for April).  This is why coal trimming is critical.
 
@@ -1518,7 +1696,7 @@ The model reads a single Excel workbook.  The `load_data()` function:
 1. Opens the Excel file and reads four sheets: `Block_A`, `Block_B`, `Starts`, and `Coal_constrains`.
 2. Merges Block A and Block B data into a single DataFrame where each row is one (block, hour) pair.
 3. Parses the `Starts` sheet into ramp profiles and start-up costs for each tier (hot, warm, very cold).
-4. Parses the `Coal_constrains` sheet into monthly coal limits (converted from kilo-tonnes to tonnes by multiplying by 1 000).
+4. Parses the `Coal_constrains` sheet into monthly coal limits.  The loader sums the **Remaining** and **DOW** coal columns when `USE_DOW_OPPORTUNITY_COSTS = True`, or uses **Remaining only** when `False`, then converts from kilo-tonnes to tonnes by multiplying by 1 000.
 5. Computes derived columns:
    - **Linearised cost curves**: `cost_slope` and `cost_fixed` from `TC_Pmax` and `TC_Pmin` (see Section 2.1).
    - **Linearised coal curves**: `coal_slope` and `coal_fixed` from `Coal conversion factor at Pmax/Pmin`.
@@ -1739,6 +1917,9 @@ Described in full detail in **Section 7.3**.  Produces two dictionaries:
 - `DOW_rev`: DOW revenue for this hour.
 - `coal_consumption`: computed from coal curves.
 - `PnL`: revenue − run_costs − start_cost − OFF_costs + DOW_rev.
+- `DUO_parameters_used`: 1 when both blocks are on (DUO cost rates were applied), 0 otherwise.  Useful for auditing which hours benefit from the DUO efficiency improvement.
+- `TC_PminN_eff_A`, `TC_PminN_eff_B`: the effective TC-at-Pmin rate that was applied in this hour — shows the DUO rate when `DUO_parameters_used = 1`, zero when the block ran solo.  Useful for reconciling cost components.
+- `TC_Pmax_eff_A`, `TC_Pmax_eff_B`: the effective TC-at-Pmax rate that was applied in this hour, following the same DUO/Mono switching logic.
 
 **Audit** (`run_audit()`): a multi-level verification to ensure the extracted DataFrame matches the solver's answer:
 
@@ -1775,19 +1956,19 @@ All parameters are defined in `schkopau_mtp/config.py`.  Changing a parameter on
 |-----------|---------|-----------------|
 | `USE_COAL_CONSTRAINS` | True | Enable/disable monthly coal caps.  Set False for "unlimited coal" scenarios. |
 | `USE_DOW_OPPORTUNITY_COSTS` | True | Include DOW steam in P_eff and DOW revenues/OFF costs (True) vs. treat as pure merchant (False). |
-| `MOSEK_MIO_TOL_REL_GAP` | 0.01 (1%) | Stop when the gap between best solution and theoretical best is ≤ this fraction. Lower = more precise but slower. |
+| `MOSEK_MIO_TOL_REL_GAP` | 0.04 (4%) | Stop when the gap between best solution and theoretical best is ≤ this fraction. Lower = more precise but slower. |
 | `MOSEK_MIO_MAX_TIME` | 600 s | Maximum time for the solver.  The solver stops after this even if the gap is above the tolerance. |
 | `MIO_SEED` | 7 | Random seed for MOSEK's branch-and-bound.  Changing this produces different (but equally valid) search paths. |
 | `CONSTRUCT_SOL` | ON | MOSEK constructs an LP solution from the integer hints before branching.  Almost always should be ON. |
 | `MIN_UP` | 8 h | Minimum consecutive hours a block must stay on after starting. |
 | `MIN_DOWN` | 6 h | Minimum consecutive hours a block must stay off after stopping. |
 | `INITIAL_ON` | {"A": 0, "B": 1} | Which blocks are on (1) or off (0) at the start of the planning horizon. |
-| `OWN_CONSUMPTION` | 10 MW | Auxiliary power the plant draws from the grid when offline. |
+| `OWN_CONSUMPTION` | 12 MW | Auxiliary power the plant draws from the grid when offline. |
 | `DOW_OFF_CONSUMPTION` | 130 MW | The DOW consumer's electric backup load when the plant is fully offline. |
 | `DOW_OPPORTUNITY_REVENUE` | 188 EUR/MW | Revenue rate for DOW steam delivery. |
 | `DOW_OFF_COMPENSATION` | 6.9 EUR/MWh | Partial compensation paid to the DOW consumer for their backup heating costs. |
 | `DUAL_BLOCK_BOOST` | 5 MW | Extra capacity each block gets when both run simultaneously. |
-| `START_MARGIN_MIN` | 0 EUR | Flat amount added to every start-up cost (safety margin for wear-and-tear uncertainty). |
+| `START_MARGIN_MIN` | 22 000 EUR | Flat amount added to every start-up cost (safety margin for wear-and-tear uncertainty). |
 | `USE_SIMPLE_STARTUP_RAMP` | False | When True, disables detailed ramp constraints (fast fallback mode).  When False, uses the detailed ramp profiles from the Starts tab. |
 | `USE_STAGED_RAMP_WARMSTART` | True | Enables two-stage solve: Stage 1 simple ramp → Stage 2 full ramp with integer hint transfer.  Only active when `USE_SIMPLE_STARTUP_RAMP = False`. |
 | `USE_STAGED_COAL_WARMSTART` | False | Alternative two-stage: Stage 1 without coal → Stage 2 with coal.  Disabled by default. |

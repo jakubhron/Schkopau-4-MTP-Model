@@ -88,8 +88,37 @@ def build_model(df: pd.DataFrame, cost_meta: dict) -> ConcreteModel:
     m.cost_slope = Param(m.B, m.T, initialize=_bt_dict("cost_slope"))
     m.cost_fixed = Param(m.B, m.T, initialize=_bt_dict("cost_fixed"))
 
+    # DUO cost/coal parameters (dual-block operation — different efficiencies)
+    _has_duo = cost_meta.get("has_duo", False)
+    m._has_duo = _has_duo
+    if _has_duo:
+        # Delta = DUO - Mono (typically negative → cheaper during dual operation)
+        _cost_slope_delta: dict = {}
+        _cost_fixed_delta: dict = {}
+        _coal_slope_delta: dict = {}
+        _coal_fixed_delta: dict = {}
+        for b in cfg.BLOCKS:
+            duo_slope_col = f"cost_slope_duo_{b}"
+            duo_fixed_col = f"cost_fixed_duo_{b}"
+            mono_slope = idx[f"cost_slope_{b}"].to_dict()
+            mono_fixed = idx[f"cost_fixed_{b}"].to_dict()
+            if duo_slope_col in idx.columns:
+                duo_slope = idx[duo_slope_col].to_dict()
+                duo_fixed = idx[duo_fixed_col].to_dict()
+                for t in range(T_len):
+                    _cost_slope_delta[(b, t)] = float(duo_slope[t]) - float(mono_slope[t])
+                    _cost_fixed_delta[(b, t)] = float(duo_fixed[t]) - float(mono_fixed[t])
+            else:
+                for t in range(T_len):
+                    _cost_slope_delta[(b, t)] = 0.0
+                    _cost_fixed_delta[(b, t)] = 0.0
+
+        m.cost_slope_delta = Param(m.B, m.T, initialize=_cost_slope_delta)
+        m.cost_fixed_delta = Param(m.B, m.T, initialize=_cost_fixed_delta)
+
     # Per-block Pmax_eff upper bounds (scalar per block)
     _pmax_eff = {b: cost_meta[f"Pmax_eff_{b}"] for b in cfg.BLOCKS}
+    m._pmax_eff = _pmax_eff  # expose for warm-start UB clip
 
     # Starts tab data (tiered costs & ramp profiles per block)
     _starts = cost_meta.get("starts", {})
@@ -133,6 +162,10 @@ def build_model(df: pd.DataFrame, cost_meta: dict) -> ConcreteModel:
     m.both_on = Var(m.T, bounds=(0, 1))     # 1 iff both blocks online
     m.plant_off = Var(m.T, bounds=(0, 1))   # 1 iff both blocks offline
 
+    # DUO variable: P_eff_duo = P_eff × both_on (McCormick linearisation)
+    if _has_duo:
+        m.P_eff_duo = Var(m.B, m.T, bounds=lambda m, b, t: (0, _pmax_eff[b]))
+
     # Tiered startup variables (indexed by B × T)
     m.hot_start = Var(m.B, m.T, within=Binary)       # 1 if startup after 5–10h off
     m.cold_start = Var(m.B, m.T, within=Binary)      # 1 if startup after 60–100h off
@@ -160,6 +193,8 @@ def build_model(df: pd.DataFrame, cost_meta: dict) -> ConcreteModel:
     _add_availability_constraints(m)
     _add_coupling_constraints(m)
     _add_cost_constraints(m)
+    if _has_duo:
+        _add_duo_mccormick_constraints(m, _pmax_eff)
     _add_power_bounds(m)
     _add_startup_shutdown_constraints(m, T_len)
     _add_off_hours_and_tier_constraints(m, T_len)
@@ -177,6 +212,27 @@ def build_model(df: pd.DataFrame, cost_meta: dict) -> ConcreteModel:
     if cfg.USE_COAL_CONSTRAINS and coal_limits:
         m.coal_slope = Param(m.B, m.T, initialize=_bt_dict("coal_slope"))
         m.coal_fixed = Param(m.B, m.T, initialize=_bt_dict("coal_fixed"))
+
+        # DUO coal deltas (difference between DUO and Mono coal curves)
+        if _has_duo:
+            _coal_slope_delta: dict = {}
+            _coal_fixed_delta: dict = {}
+            for b in cfg.BLOCKS:
+                duo_col = f"coal_slope_duo_{b}"
+                if duo_col in idx.columns:
+                    mono_s = idx[f"coal_slope_{b}"].to_dict()
+                    duo_s = idx[duo_col].to_dict()
+                    mono_f = idx[f"coal_fixed_{b}"].to_dict()
+                    duo_f = idx[f"coal_fixed_duo_{b}"].to_dict()
+                    for t in range(T_len):
+                        _coal_slope_delta[(b, t)] = float(duo_s[t]) - float(mono_s[t])
+                        _coal_fixed_delta[(b, t)] = float(duo_f[t]) - float(mono_f[t])
+                else:
+                    for t in range(T_len):
+                        _coal_slope_delta[(b, t)] = 0.0
+                        _coal_fixed_delta[(b, t)] = 0.0
+            m.coal_slope_delta = Param(m.B, m.T, initialize=_coal_slope_delta)
+            m.coal_fixed_delta = Param(m.B, m.T, initialize=_coal_fixed_delta)
 
         # Group time indices by (year, month)
         _month_hours: dict[tuple[int, int], list[int]] = {}
@@ -196,16 +252,23 @@ def build_model(df: pd.DataFrame, cost_meta: dict) -> ConcreteModel:
                 initialize={(y, mo): coal_limits[(y, mo)] * 1000.0 for y, mo in _active_months},
             )
 
+            _duo = _has_duo
+
             def coal_monthly_rule(m, y, mo):
                 hours = _month_hours[(y, mo)]
-                return (
-                    sum(
-                        m.coal_slope[b, t] * m.P_eff[b, t]
-                        + m.coal_fixed[b, t] * m.on[b, t]
+                expr = sum(
+                    m.coal_slope[b, t] * m.P_eff[b, t]
+                    + m.coal_fixed[b, t] * m.on[b, t]
+                    for b in m.B for t in hours
+                )
+                # DUO adjustment: when both blocks ON, use DUO coal curves
+                if _duo:
+                    expr += sum(
+                        m.coal_slope_delta[b, t] * m.P_eff_duo[b, t]
+                        + m.coal_fixed_delta[b, t] * m.both_on[t]
                         for b in m.B for t in hours
                     )
-                    <= m.coal_limit_t[y, mo]
-                )
+                return expr <= m.coal_limit_t[y, mo]
 
             m.coal_monthly_limit = Constraint(m.coal_months, rule=coal_monthly_rule)
 
@@ -301,7 +364,13 @@ def warm_start_heuristic(m) -> None:
                 pmin = float(value(m.Pmin[b, t]))
                 both = 1 if all(on_hint[bb][t] == 1 for bb in B_list) else 0
                 boost = cfg.DUAL_BLOCK_BOOST * both
-                dow = float(value(m.DOW[t])) if (b == cfg.DOW_BLOCK and cfg.USE_DOW_OPPORTUNITY_COSTS) else 0.0
+                if not cfg.USE_DOW_OPPORTUNITY_COSTS:
+                    dow = 0.0
+                elif b == cfg.DOW_BLOCK:
+                    dow = float(value(m.DOW[t]))
+                else:
+                    # Secondary block carries DOW only when primary is OFF
+                    dow = float(value(m.DOW[t])) * (1 - both)
                 p_eff_min = pmin + boost + dow
                 rate = (float(value(m.coal_slope[b, t])) * p_eff_min
                         + float(value(m.coal_fixed[b, t])))
@@ -598,16 +667,107 @@ def warm_start_heuristic(m) -> None:
             else:
                 p_eff = p_val  # P_eff = P when DOW flag off
             # Cap P_eff to its variable bound; back-adjust P if needed
-            peff_ub = m.P_eff[b, t].ub
+            peff_ub = m._pmax_eff[b]
             if p_eff > peff_ub:
                 p_eff = peff_ub
                 m.P[b, t].value = p_eff  # P = P_eff when capped
             m.P_eff[b, t].value = p_eff
 
+            # P_eff_duo = P_eff × both_on (McCormick product)
+            both_int = round(both_on_val)
+            if m._has_duo:
+                m.P_eff_duo[b, t].value = p_eff * both_int
+
             # run_costs = cost_slope * P_eff + cost_fixed * on
+            #           + cost_slope_delta * P_eff_duo + cost_fixed_delta * both_on
             rc = (float(value(m.cost_slope[b, t])) * p_eff
                   + float(value(m.cost_fixed[b, t])) * on_val)
+            if m._has_duo:
+                rc += (float(value(m.cost_slope_delta[b, t])) * p_eff * both_int
+                       + float(value(m.cost_fixed_delta[b, t])) * both_int)
             m.run_costs[b, t].value = rc
+
+    # --- Final coal clamp: catch residual overshoots after P_eff finalisation ---
+    if hasattr(m, "coal_monthly_limit") and hasattr(m, "_month_hours"):
+        _primary = cfg.DOW_BLOCK
+        for ym in sorted(m._month_hours):
+            if ym not in {tuple(k) for k in m.coal_months}:
+                continue
+            limit = float(value(m.coal_limit_t[ym]))
+            hours = m._month_hours[ym]
+
+            coal_total = 0.0
+            slot_coal = []
+            for b in B_list:
+                for t in hours:
+                    on_val = round(m.on[b, t].value or 0)
+                    if on_val == 1:
+                        p_eff = m.P_eff[b, t].value or 0.0
+                        both = round(m.both_on[t].value or 0)
+                        c = (float(value(m.coal_slope[b, t])) * p_eff
+                             + float(value(m.coal_fixed[b, t])))
+                        if m._has_duo:
+                            c += (float(value(m.coal_slope_delta[b, t])) * p_eff * both
+                                  + float(value(m.coal_fixed_delta[b, t])) * both)
+                        coal_total += c
+                        p_val = m.P[b, t].value or 0.0
+                        pmin = float(value(m.Pmin[b, t]))
+                        both = round(m.both_on[t].value or 0)
+                        p_floor = pmin + cfg.DUAL_BLOCK_BOOST * both
+                        room = max(p_val - p_floor, 0.0)
+                        if room > 0:
+                            slot_coal.append((b, t, room, float(value(m.coal_slope[b, t]))))
+
+            if coal_total <= limit + 1.0:
+                continue
+
+            overshoot = coal_total - limit
+            total_reducible = sum(room * slope for _, _, room, slope in slot_coal)
+            if total_reducible <= 0:
+                print(f"    WARN: coal clamp {ym[0]}-{ym[1]:02d}: overshoot {overshoot:.0f}t "
+                      f"but no slots to shrink")
+                continue
+
+            scale_back = min(overshoot / total_reducible, 1.0)
+            for b, t, room, slope in slot_coal:
+                dp = room * scale_back
+                new_p = (m.P[b, t].value or 0.0) - dp
+                m.P[b, t].value = new_p
+                # Recompute P_eff
+                on_val = round(m.on[b, t].value or 0)
+                dow = float(value(m.DOW[t]))
+                both_v = round(m.both_on[t].value or 0)
+                if cfg.USE_DOW_OPPORTUNITY_COSTS:
+                    if b == _primary:
+                        p_eff = new_p + dow * on_val
+                    else:
+                        p_eff = new_p + dow * (on_val - both_v)
+                else:
+                    p_eff = new_p
+                peff_ub = m._pmax_eff[b]
+                if p_eff > peff_ub:
+                    p_eff = peff_ub
+                m.P_eff[b, t].value = p_eff
+                if m._has_duo:
+                    m.P_eff_duo[b, t].value = p_eff * both_v
+                rc = (float(value(m.cost_slope[b, t])) * p_eff
+                      + float(value(m.cost_fixed[b, t])) * on_val)
+                if m._has_duo:
+                    rc += (float(value(m.cost_slope_delta[b, t])) * p_eff * both_v
+                           + float(value(m.cost_fixed_delta[b, t])) * both_v)
+                m.run_costs[b, t].value = rc
+
+            new_coal = sum(
+                (float(value(m.coal_slope[b, t])) * (m.P_eff[b, t].value or 0.0)
+                 + float(value(m.coal_fixed[b, t])) * round(m.on[b, t].value or 0)
+                 + (float(value(m.coal_slope_delta[b, t])) * (m.P_eff_duo[b, t].value or 0.0)
+                    + float(value(m.coal_fixed_delta[b, t])) * round(m.both_on[t].value or 0)
+                    if m._has_duo else 0.0))
+                for b in B_list for t in hours
+            )
+            print(f"    Coal clamp {ym[0]}-{ym[1]:02d}: "
+                  f"reduced {coal_total:.0f}t → {new_coal:.0f}t "
+                  f"(limit {limit:.0f}t, scale-back {scale_back:.1%})")
 
     # --- Comprehensive warm-start constraint violation check ---
     from pyomo.environ import Constraint as _Con
@@ -714,10 +874,34 @@ def _add_cost_constraints(m) -> None:
 
     m.peff_def = Constraint(m.B, m.T, rule=peff_def_rule)
 
+    _duo = m._has_duo
+
     def cost_rule(m, b, t):
-        return m.run_costs[b, t] == m.cost_slope[b, t] * m.P_eff[b, t] + m.cost_fixed[b, t] * m.on[b, t]
+        expr = m.cost_slope[b, t] * m.P_eff[b, t] + m.cost_fixed[b, t] * m.on[b, t]
+        if _duo:
+            # DUO adjustment: Δslope × P_eff_duo + Δfixed × both_on
+            expr += m.cost_slope_delta[b, t] * m.P_eff_duo[b, t]
+            expr += m.cost_fixed_delta[b, t] * m.both_on[t]
+        return m.run_costs[b, t] == expr
 
     m.cost_def = Constraint(m.B, m.T, rule=cost_rule)
+
+
+def _add_duo_mccormick_constraints(m, _pmax_eff) -> None:
+    """McCormick envelope: P_eff_duo = P_eff × both_on (linearised)."""
+
+    def duo_ub1(m, b, t):
+        return m.P_eff_duo[b, t] <= m.P_eff[b, t]
+
+    def duo_ub2(m, b, t):
+        return m.P_eff_duo[b, t] <= _pmax_eff[b] * m.both_on[t]
+
+    def duo_lb(m, b, t):
+        return m.P_eff_duo[b, t] >= m.P_eff[b, t] - _pmax_eff[b] * (1 - m.both_on[t])
+
+    m.duo_ub1 = Constraint(m.B, m.T, rule=duo_ub1)
+    m.duo_ub2 = Constraint(m.B, m.T, rule=duo_ub2)
+    m.duo_lb = Constraint(m.B, m.T, rule=duo_lb)
 
 
 def _add_power_bounds(m) -> None:
