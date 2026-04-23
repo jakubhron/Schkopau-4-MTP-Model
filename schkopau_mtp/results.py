@@ -74,6 +74,8 @@ def run_audit(
     if not skip_solve:
         _print_pyomo_component_audit(df, m, obj_val, cost_meta=cost_meta)
 
+    _print_coal_duo_diagnostic(df, cost_meta=cost_meta)
+
 
 # ====================================================================
 #  INTERNAL – variable extraction
@@ -113,6 +115,11 @@ def _extract_decision_variables(df: pd.DataFrame, m) -> pd.DataFrame:
         for b in cfg.BLOCKS:
             df[f"duo_cost_adj_{b}"] = [float(value(m.duo_cost_adj[b, t])) for t in m.T]
 
+    # Extract solver's DUO coal linearisation parameter for post-hoc comparison
+    if getattr(m, "duo_coal_adj", None) is not None:
+        for b in cfg.BLOCKS:
+            df[f"duo_coal_adj_{b}"] = [float(value(m.duo_coal_adj[b, t])) for t in m.T]
+
     # Plant-level aggregates (sum of blocks)
     df["P"] = sum(df[f"P_{b}"] for b in cfg.BLOCKS)
     df["on_model"] = (sum(df[f"on_model_{b}"] for b in cfg.BLOCKS) > 0).astype(int)
@@ -131,7 +138,8 @@ def _compute_tiered_start_cost(on_series, startup_series, tiers, initial_on=1):
     """Compute startup cost per hour matching the Pyomo feasible tiers.
 
     Feasible tiers (with MIN_DOWN ≥ 6):
-      warm   – offline < 60 h
+      hot    – offline < 10 h  (forced by on[b, t-10] lookback)
+      warm   – offline 10–59 h
       cold   – offline 60–99 h
       vcold  – offline ≥ 100 h
 
@@ -146,9 +154,11 @@ def _compute_tiered_start_cost(on_series, startup_series, tiers, initial_on=1):
         return pd.Series(costs, index=on_series.index)
 
     tier_map = {t["name"]: t for t in tiers}
+    hot_cost = tier_map.get("hot", {}).get("cost", 0.0)
     warm_cost = tier_map.get("warm", {}).get("cost", 0.0)
     cold_cost = tier_map.get("cold", {}).get("cost", warm_cost)
     vcold_cost = tier_map.get("vcold", {}).get("cost", warm_cost)
+    hot_thresh = 10   # matches Pyomo's on[b, t-10] lookback
     cold_thresh = 60
     vcold_thresh = 100
 
@@ -164,8 +174,10 @@ def _compute_tiered_start_cost(on_series, startup_series, tiers, initial_on=1):
                     costs[i] = vcold_cost
                 elif off_count >= cold_thresh:
                     costs[i] = cold_cost
-                else:
+                elif off_count >= hot_thresh:
                     costs[i] = warm_cost
+                else:
+                    costs[i] = hot_cost
             off_count = 0
 
     return pd.Series(costs, index=on_series.index)
@@ -235,6 +247,36 @@ def _compute_pnl(df: pd.DataFrame, cost_meta: dict) -> pd.DataFrame:
             df[f"run_costs_solver_{b}"] = rc_exact
             df[f"duo_linearization_error_{b}"] = 0.0
 
+        # --- Coal consumption: exact vs solver-consistent ---
+        _coal_slope_col = f"coal_slope_{b}"
+        _coal_fixed_col = f"coal_fixed_{b}"
+        _has_coal = _coal_slope_col in df.columns
+        if _has_coal:
+            _coal_s = pd.to_numeric(df[_coal_slope_col], errors="coerce").fillna(0.0)
+            _coal_f = pd.to_numeric(df[_coal_fixed_col], errors="coerce").fillna(0.0)
+            coal_mono = _coal_s * P_eff_b + _coal_f * on_b
+
+            _coal_s_duo_col = f"coal_slope_duo_{b}"
+            _has_coal_duo = _has_duo and _coal_s_duo_col in df.columns
+            if _has_coal_duo:
+                _coal_s_duo = pd.to_numeric(df[_coal_s_duo_col], errors="coerce").fillna(0.0)
+                _coal_f_duo = pd.to_numeric(df[f"coal_fixed_duo_{b}"], errors="coerce").fillna(0.0)
+                coal_exact = coal_mono + (_coal_s_duo - _coal_s) * P_eff_b * _both + (_coal_f_duo - _coal_f) * _both
+            else:
+                coal_exact = coal_mono
+
+            # Solver-consistent: mono + duo_coal_adj × both_on
+            _coal_adj_col = f"duo_coal_adj_{b}"
+            if _has_coal_duo and _coal_adj_col in df.columns:
+                coal_solver = coal_mono + df[_coal_adj_col] * _both
+                df[f"coal_solver_{b}"] = coal_solver
+                df[f"duo_coal_linearization_error_{b}"] = coal_exact - coal_solver
+            else:
+                df[f"coal_solver_{b}"] = coal_exact
+                df[f"duo_coal_linearization_error_{b}"] = 0.0
+
+            df[f"coal_exact_{b}"] = coal_exact
+
         # Tiered startup cost: compute offline duration at each startup
         sc = _compute_tiered_start_cost(on_b, df[f"startup_{b}"], starts.get(b, []),
                                          initial_on=cfg.INITIAL_ON.get(b, 1))
@@ -251,6 +293,14 @@ def _compute_pnl(df: pd.DataFrame, cost_meta: dict) -> pd.DataFrame:
     df["duo_linearization_error"] = sum(df[f"duo_linearization_error_{b}"] for b in cfg.BLOCKS)
     df["start_cost"] = total_start_cost
     df["profit_spot"] = total_profit_spot
+
+    # Plant-level coal aggregates (solver-consistent vs exact)
+    if any(f"coal_exact_{b}" in df.columns for b in cfg.BLOCKS):
+        df["coal_exact"] = sum(df.get(f"coal_exact_{b}", 0.0) for b in cfg.BLOCKS)
+        df["coal_solver"] = sum(df.get(f"coal_solver_{b}", 0.0) for b in cfg.BLOCKS)
+        df["duo_coal_linearization_error"] = sum(
+            df.get(f"duo_coal_linearization_error_{b}", 0.0) for b in cfg.BLOCKS
+        )
 
     # OFF_costs when BOTH blocks offline
     _any_on = sum(df[f"on_model_{b}"] for b in cfg.BLOCKS)
@@ -312,6 +362,101 @@ def _compute_pnl(df: pd.DataFrame, cost_meta: dict) -> pd.DataFrame:
 # ====================================================================
 #  INTERNAL – audit / reconciliation
 # ====================================================================
+
+
+def _print_coal_duo_diagnostic(df, cost_meta=None):
+    """Print monthly coal DUO linearisation diagnostic.
+
+    Compares solver-consistent coal (using linearised duo_coal_adj) vs
+    exact coal (using actual P_eff × both_on) per month.  Flags months
+    where exact coal exceeds the constraint limit even though the solver's
+    linearised view was within bounds.
+    """
+    if "coal_exact" not in df.columns or "coal_solver" not in df.columns:
+        return
+    if "Date" not in df.columns:
+        return
+
+    coal_limits = (cost_meta or {}).get("coal_limits", {})
+    _tol = 1.0 + getattr(cfg, "COAL_TOLERANCE", 0.0)
+
+    dates = pd.to_datetime(df["Date"])
+    df_tmp = df.copy()
+    df_tmp["_ym"] = list(zip(dates.dt.year, dates.dt.month))
+
+    grouped = df_tmp.groupby("_ym")
+    coal_solver_m = grouped["coal_solver"].sum()
+    coal_exact_m = grouped["coal_exact"].sum()
+
+    # Per-block breakdowns
+    block_solver = {}
+    block_exact = {}
+    block_error = {}
+    for b in cfg.BLOCKS:
+        if f"coal_solver_{b}" in df_tmp.columns:
+            block_solver[b] = grouped[f"coal_solver_{b}"].sum()
+            block_exact[b] = grouped[f"coal_exact_{b}"].sum()
+            block_error[b] = grouped[f"duo_coal_linearization_error_{b}"].sum()
+
+    print("\n" + "=" * 80)
+    print("COAL DUO LINEARISATION DIAGNOSTIC (monthly)")
+    print("=" * 80)
+    print(f"{'Month':>10s}  {'Solver [t]':>12s}  {'Exact [t]':>12s}  "
+          f"{'Error [t]':>10s}  {'Limit [t]':>12s}  {'Status'}")
+    print("-" * 80)
+
+    any_problem = False
+    for ym in sorted(coal_solver_m.index):
+        s_val = float(coal_solver_m[ym])
+        e_val = float(coal_exact_m[ym])
+        err = e_val - s_val
+        limit_kt = coal_limits.get(ym, None)
+        if limit_kt is not None:
+            limit_t = limit_kt * 1000.0 * _tol
+            limit_disp = f"{limit_t:,.0f}"
+            if e_val > limit_t and s_val <= limit_t:
+                status = "!! EXACT EXCEEDS LIMIT (solver blind)"
+                any_problem = True
+            elif e_val > limit_t:
+                status = "! BOTH EXCEED LIMIT"
+                any_problem = True
+            elif abs(err) > 1.0:
+                status = "ok (error > 1t)"
+            else:
+                status = "ok"
+        else:
+            limit_disp = "n/a"
+            status = "(no limit)"
+
+        y, mo = ym
+        print(f"  {y}-{mo:02d}    {s_val:>12,.0f}  {e_val:>12,.0f}  "
+              f"{err:>+10,.0f}  {limit_disp:>12s}  {status}")
+
+    if block_solver:
+        print()
+        print("  Per-block linearisation error (exact - solver) [t]:")
+        for b in cfg.BLOCKS:
+            if b in block_error:
+                for ym in sorted(block_error[b].index):
+                    y, mo = ym
+                    be = float(block_error[b][ym])
+                    if abs(be) > 0.5:
+                        print(f"    Block {b}  {y}-{mo:02d}: {be:+,.1f} t")
+
+    if any_problem:
+        print("\n  WARNING: Coal DUO linearisation causes solver to undercount "
+              "coal in at least one month.")
+        print("           Consider additional re-linearisation passes or "
+              "tightening COAL_TOLERANCE.")
+    else:
+        print("\n  Coal DUO linearisation within tolerance for all months.")
+
+    # Horizon summary
+    total_err = float(df["duo_coal_linearization_error"].sum())
+    duo_hours = int((df.get("DUO_parameters_used", 0) > 0).sum())
+    print(f"\n  Horizon total coal error: {total_err:+,.1f} t  "
+          f"({duo_hours} DUO hours)")
+    print("=" * 80)
 
 
 def _print_pnl_reconciliation(df, obj_val, pnl_val):
@@ -414,7 +559,7 @@ def _print_pyomo_component_audit(df, m, obj_val_global, cost_meta=None):
     _vcold_delta = {}
     for b in cfg.BLOCKS:
         tiers = {t["name"]: t for t in starts.get(b, [])}
-        hc = tiers.get("hot", {}).get("cost", 47_510.0)
+        hc = tiers.get("hot", {}).get("cost", 25_510.0)
         wc = tiers.get("warm", {}).get("cost", 38_291.0)
         cc = tiers.get("cold", {}).get("cost", 39_910.0)
         vc = tiers.get("vcold", {}).get("cost", 60_251.0)

@@ -95,7 +95,7 @@ def write_excel(
                            "cost_slope_duo", "cost_fixed_duo",
                            "coal_slope_duo", "coal_fixed_duo",
                            "TC_PminN_duo", "TC_Pmax_duo",
-                           "duo_cost_adj")
+                           "duo_cost_adj", "duo_coal_adj")
             for b in cfg.BLOCKS
         ]
         df_out = df_out.drop(columns=[c for c in _internal_cols if c in df_out.columns])

@@ -927,7 +927,165 @@ else:
 <p>The loop uses a <strong>convergence-based stopping rule</strong> rather than a fixed iteration count.  It terminates early when both:
 - <span class="arithmatex">\(|\Delta\text{objective}| &lt; \text{RELIN\_OBJ\_TOL}\)</span> (default: 5 000 EUR)
 - <span class="arithmatex">\(|\Delta\text{DUO cost sum}| &lt; \text{RELIN\_DUO\_COST\_TOL}\)</span> (default: 2 000 EUR)</p>
+<p>Each pass also tracks the <strong>total DUO coal adjustment</strong> — the sum of <code>duo_coal_adj × both_on</code> across all (block, hour) pairs — and prints <code>|Δ DUO coal|</code> alongside the objective and cost deltas.  This provides visibility into whether the coal-side linearisation is converging even though it is not part of the formal stopping rule.</p>
 <p>This keeps the MIP compact while iteratively tightening the DUO approximation only as long as meaningful improvement is being made.</p>
+<h4>Plain-language explanation: why re-linearisation matters (cost side)</h4>
+<p><strong>The core problem in everyday terms:</strong></p>
+<p>When both blocks run together, they share steam infrastructure and become more fuel-efficient — roughly 2 EUR/MWh cheaper.  But the exact savings depend on <em>how hard</em> each block is running (its power level).  A block at 160 MW saves a different amount than the same block at 400 MW.</p>
+<p>The solver cannot handle "the discount depends on the answer" — it needs a fixed discount per hour <em>before</em> it starts optimising.  So we <strong>guess</strong> a likely power level (call it <span class="arithmatex">\(P_{\text{nom}}\)</span>) and pre-calculate the DUO discount based on that guess.  The solver then uses that fixed discount to make all its on/off and power-level decisions.</p>
+<p><strong>The catch:</strong> if the solver ends up dispatching Block A at 400 MW but we calculated the discount assuming 300 MW, the discount we told the solver was slightly wrong.  The solver thinks it saved (say) 820 EUR that hour, but the true saving was 880 EUR.  The 60 EUR difference is the "linearisation error."</p>
+<p><strong>Why it adds up:</strong>  Over a typical planning horizon, approximately 2 500 hours have both blocks running.  If the average hourly error is ±80 EUR, the cumulative error is ±200 000 EUR — roughly 0.4% of total PnL (€50M).  Not enormous, but not negligible when it drives dispatch decisions.</p>
+<p><strong>How re-linearisation fixes it — step by step:</strong></p>
+<p>Imagine you are negotiating a bulk coal purchase for October.  You don't know exactly how many tonnes you'll need, so you estimate 250 000 t and get a price quote based on that volume.  After placing the order, you realise you actually need 280 000 t.  So you go back to the supplier with the updated volume, get a revised quote, place a new order, and check again.  After 2–3 rounds the estimate and the actual volume converge.</p>
+<p>Re-linearisation works the same way:</p>
+<table>
+<thead>
+<tr>
+<th>Pass</th>
+<th>What happens</th>
+<th>Analogy</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Stage 1</strong></td>
+<td>Solve with <span class="arithmatex">\(P_{\text{nom}}\)</span> = midpoint (generic guess).</td>
+<td>First estimate: "we'll probably need about 250 kt."</td>
+</tr>
+<tr>
+<td><strong>Stage 2</strong></td>
+<td>Use Stage 1's actual power levels as the new <span class="arithmatex">\(P_{\text{nom}}\)</span>. Solve again.</td>
+<td>Revised estimate using actual consumption patterns.</td>
+</tr>
+<tr>
+<td><strong>Pass 3</strong></td>
+<td>Use Stage 2's actual power levels. Solve again. Check if anything changed.</td>
+<td>Third round: "consumption is 279.5 kt, quote barely changed — done."</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Real example from the model:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Pass</th>
+<th style="text-align: right;">Objective (EUR)</th>
+<th style="text-align: right;">Δ Objective</th>
+<th style="text-align: right;">DUO cost error</th>
+<th>Comment</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Stage 1</td>
+<td style="text-align: right;">45 387 000</td>
+<td style="text-align: right;">—</td>
+<td style="text-align: right;">−199 000</td>
+<td>Generic midpoint guess; 199K cost error</td>
+</tr>
+<tr>
+<td>Stage 2</td>
+<td style="text-align: right;">49 252 000</td>
+<td style="text-align: right;">+3 865 000</td>
+<td style="text-align: right;">−198 700</td>
+<td>Better P_nom, but also full ramp constraints now</td>
+</tr>
+<tr>
+<td>Re-lin 1</td>
+<td style="text-align: right;">49 260 000</td>
+<td style="text-align: right;">+8 000</td>
+<td style="text-align: right;">−2 100</td>
+<td>Error dropped from 199K to 2K — almost converged</td>
+</tr>
+<tr>
+<td>Re-lin 2</td>
+<td style="text-align: right;">49 260 500</td>
+<td style="text-align: right;">+500</td>
+<td style="text-align: right;">−300</td>
+<td>Below tolerance → stop</td>
+</tr>
+</tbody>
+</table>
+<p>After two re-linearisation passes, the cost error shrank from 199 000 EUR to just 300 EUR.  The solver's view of costs now matches reality almost perfectly.</p>
+<h4>Plain-language explanation: the coal blind spot</h4>
+<p><strong>The cost error is annoying but harmless</strong> — the model finds a slightly sub-optimal schedule, but it never violates any physical limit.  Think of it as leaving a small amount of money on the table.</p>
+<p><strong>The coal error is dangerous</strong> — it can cause the model to approve a schedule that <strong>actually burns more coal than the monthly limit allows</strong>.  This is because the same linearisation approximation applies to coal consumption, and the coal consumption formula feeds directly into the monthly coal constraint.</p>
+<p><strong>Analogy: a bathroom scale that reads 2 kg light.</strong></p>
+<p>Imagine you are on a strict diet: your doctor says you must stay under 100 kg.  Every morning you step on your bathroom scale and it shows 98 kg — you're fine.  But one day you step on the scale at the doctor's office and it reads 102 kg.  Your home scale was wrong by 2 kg, and you unknowingly exceeded the limit.</p>
+<p>In our model:
+- <strong>Your home scale</strong> = the solver's view of coal consumption (<code>coal_solver</code>, computed using the linearised DUO adjustment).
+- <strong>The doctor's scale</strong> = the exact post-solve calculation (<code>coal_exact</code>, using the real power levels from the solved schedule).
+- <strong>The 100 kg limit</strong> = the monthly coal cap (e.g. 297 800 tonnes for October).</p>
+<p><strong>What happens in practice — October example:</strong></p>
+<p>The solver builds a schedule for October and checks: "Total coal this month = 299 329 tonnes.  The limit (with tolerance) is 299 329 tonnes.  OK — just barely fits."</p>
+<p>But after solving, the post-solve audit computes the <em>exact</em> coal consumption using the actual power levels and finds: 299 434 tonnes.  That's <strong>105 tonnes over</strong> the limit that the solver thought it was staying within.</p>
+<pre><code>     Month    Solver [t]     Exact [t]   Error [t]     Limit [t]  Status
+  2026-10     299,329        299,434        +105       299,329    !! EXACT EXCEEDS LIMIT (solver blind)
+</code></pre>
+<p>The solver was "blind" to those 105 extra tonnes.  It approved the schedule in good faith, but reality exceeded the budget.</p>
+<p><strong>Why does this happen?</strong></p>
+<p>The coal DUO discount works exactly like the cost DUO discount: when both blocks run, they burn slightly less coal per MWh because of shared steam.  The solver pre-computes this coal saving at a guessed power level (<span class="arithmatex">\(P_{\text{nom}}\)</span>).  If the actual power level differs, the real coal saving differs too.</p>
+<p>For October in our model:
+- Block B's linearisation error alone was <strong>+122 tonnes</strong> (the solver undercounted coal for Block B because it ran at different power levels than the guess).
+- Block A's error was <strong>−17 tonnes</strong> (slight overcount — these partially cancel).
+- Net: the solver undercounted <strong>105 tonnes</strong> plant-wide.</p>
+<p><strong>105 tonnes vs. a 298 000 tonne budget sounds tiny (0.04%).  Why does it matter?</strong></p>
+<p>Because the solver pushed the schedule right up against the monthly limit.  When you're at 99.99% of a constraint, even a 0.04% error can push you over.  The coal limit is often the single most binding constraint in the model — the solver uses every tonne it can, so even small errors at the margin become violations.</p>
+<p><strong>How re-linearisation fixes the coal blind spot:</strong></p>
+<p>Same mechanism as for costs — each pass updates the guess to match reality:</p>
+<table>
+<thead>
+<tr>
+<th>Pass</th>
+<th style="text-align: right;">Horizon coal error (t)</th>
+<th style="text-align: right;">October error (t)</th>
+<th style="text-align: right;">Solver-blind months</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Stage 2 (first solve)</td>
+<td style="text-align: right;">−599.6</td>
+<td style="text-align: right;">+105</td>
+<td style="text-align: right;">2 (Apr, Oct)</td>
+</tr>
+<tr>
+<td>Re-linearisation 1</td>
+<td style="text-align: right;">−12.3</td>
+<td style="text-align: right;">+3</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr>
+<td>Re-linearisation 2</td>
+<td style="text-align: right;">−0.1</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+</tr>
+</tbody>
+</table>
+<p>After two passes, the total coal error across the entire 9-month horizon dropped from 600 tonnes to 0.1 tonnes, and no months remain where the solver is blind to a limit violation.</p>
+<p><strong>The bottom line for business:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Issue</th>
+<th>Consequence without re-linearisation</th>
+<th>Consequence with re-linearisation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Cost error</strong> (~200K EUR)</td>
+<td>The model leaves ~200K of profit on the table.  PnL is slightly understated, but no physical limits are violated.</td>
+<td>Error drops to &lt; 1K EUR.  PnL is almost exact.</td>
+</tr>
+<tr>
+<td><strong>Coal error</strong> (~600 t)</td>
+<td>The model may approve schedules that exceed monthly coal limits by 40–105 tonnes.  This could trigger contractual penalties or require last-minute dispatch corrections.</td>
+<td>Error drops to &lt; 1 t.  All coal limits are reliably respected.</td>
+</tr>
+</tbody>
+</table>
 <h4>Solver-consistent vs post-solve exact costs</h4>
 <p>An important consequence of the linearisation is that the solver's objective uses the <em>approximate</em> DUO cost (via <code>duo_cost_adj</code>), while the true economic cost depends on the <em>actual</em> <span class="arithmatex">\(P_{\text{eff}}\)</span> at each hour.  The reports therefore provide <strong>two cost views</strong>:</p>
 <table>
@@ -952,11 +1110,27 @@ else:
 <tr>
 <td><code>duo_linearization_error</code></td>
 <td><code>run_costs</code> − <code>run_costs_solver</code></td>
-<td>Quantifies the approximation gap per hour</td>
+<td>Quantifies the cost approximation gap per hour</td>
+</tr>
+<tr>
+<td><code>coal_exact</code></td>
+<td>Exact: mono coal + <span class="arithmatex">\(\Delta\text{coal\_slope} \times P_{\text{eff}} \times \text{both\_on} + \Delta\text{coal\_fixed} \times \text{both\_on}\)</span></td>
+<td>True coal consumption for constraint checking</td>
+</tr>
+<tr>
+<td><code>coal_solver</code></td>
+<td>Solver-consistent: mono coal + <code>duo_coal_adj</code> <span class="arithmatex">\(\times\)</span> <code>both_on</code></td>
+<td>Matches the coal the solver saw in the monthly constraints</td>
+</tr>
+<tr>
+<td><code>duo_coal_linearization_error</code></td>
+<td><code>coal_exact</code> − <code>coal_solver</code></td>
+<td>Quantifies the coal approximation gap per hour</td>
 </tr>
 </tbody>
 </table>
-<p>The <code>DUO linearization error</code> row in the Monthly summary sheet shows the total error aggregated by month.  A small value (typically &lt; 0.5% of PnL) confirms the linearisation is adequate; a large value would motivate increasing <code>RELINEARIZE_MAX_ITERS</code>.</p>
+<p>The <code>DUO linearization error</code> row in the Monthly summary sheet shows the total cost error aggregated by month.  The coal equivalent is shown in the <strong>Coal DUO Linearisation Diagnostic</strong> printed after each solve (see Section 8.1, Step 9).  A small value (typically &lt; 0.5% of PnL for costs, or &lt; 1% of coal limit) confirms the linearisation is adequate; a large value would motivate increasing <code>RELINEARIZE_MAX_ITERS</code>.</p>
+<p><strong>Why coal linearisation matters separately from cost linearisation:</strong> The cost approximation error affects only the objective function — the solver finds a slightly sub-optimal solution but the constraints remain exact.  The coal approximation error, however, affects the <strong>monthly coal constraints themselves</strong>.  The solver uses <code>coal_solver</code> (the linearised value) to check whether a schedule respects the coal limit.  If <code>coal_exact &gt; coal_solver</code> in a particular month, the solver may approve a schedule that in reality exceeds the coal limit — the solver is "blind" to the true coal consumption.  This is why the post-solve coal DUO diagnostic (Section 8.1, Step 9) flags months where the exact coal exceeds the limit even though the solver-consistent coal does not.</p>
 <h4>Design decision: why linearisation, not exact McCormick</h4>
 <p>An exact <span class="arithmatex">\(P_{\text{eff}} \times \text{both\_on}\)</span> formulation was tested using McCormick envelope constraints to create an auxiliary variable <span class="arithmatex">\(P_{\text{eff\_duo}} = P_{\text{eff}} \times \text{both\_on}\)</span>.  However, this approach introduced 3 extra constraints per block per hour (36,726 additional constraints), significantly slowing the solver.  The pre-linearised approach achieves nearly identical results (~0.3% error) with zero additional variables and a single parameter per block per hour, making solves <strong>2–3× faster</strong>.</p>
 <p>The production model therefore uses pointwise linearised DUO adjustment, optionally refined through sequential re-linearisation.  Reports contain both solver-consistent and post-solve corrected economics so the approximation is always transparent.</p>
@@ -2467,7 +2641,7 @@ results = solve_model(solver, m, tee=True)         <span class="c8"># solve full
 <li><strong>Applies <code>_fix_tiers_from_hint</code> using Stage 1 (<code>m1</code>) as the fixed reference</strong> — not the latest solve.  This keeps the variable-fixing skeleton constant so the warm-start stays feasible.</li>
 <li>Re-solves.</li>
 </ol>
-<p>The loop uses a <strong>convergence-based stopping rule</strong>: it terminates early when both <span class="arithmatex">\(|\Delta\text{objective}| &lt; \text{RELIN\_OBJ\_TOL}\)</span> and <span class="arithmatex">\(|\Delta\text{DUO cost}| &lt; \text{RELIN\_DUO\_COST\_TOL}\)</span>.  This avoids wasted passes when the linearisation is already tight, and guarantees that additional passes only occur when they provide meaningful improvement.</p>
+<p>The loop uses a <strong>convergence-based stopping rule</strong>: it terminates early when both <span class="arithmatex">\(|\Delta\text{objective}| &lt; \text{RELIN\_OBJ\_TOL}\)</span> and <span class="arithmatex">\(|\Delta\text{DUO cost}| &lt; \text{RELIN\_DUO\_COST\_TOL}\)</span>.  Each pass also prints <span class="arithmatex">\(|\Delta\text{DUO coal}|\)</span> for visibility into coal-side convergence.  This avoids wasted passes when the linearisation is already tight, and guarantees that additional passes only occur when they provide meaningful improvement.</p>
 <p>The key step is <code>_copy_integer_hint(m1, m)</code>.  This function loops through every binary/integer variable in Stage 1's solved model and copies its value to the corresponding variable in Stage 2.  It skips variables that are <em>fixed</em> in the source (e.g. <code>in_ramp</code> fixed to 0 in simple-ramp mode — these are model constants, not MIP decisions) and respects initial-condition locks in the destination.</p>
 <p><strong>Why does this help?</strong> Stage 1's optimal on/off schedule is close to Stage 2's — the ramp constraints mainly affect power levels during startup hours, not the overall dispatch pattern.  By giving Stage 2 a proven-good starting schedule, MOSEK can focus on optimising around the ramp constraints rather than re-discovering the basic pattern.</p>
 <p><strong><code>_fix_tiers_from_hint(m, m1, window=24)</code></strong> — the most impactful Stage 2 speedup.  It identifies all on→off and off→on transitions in Stage 1's solution, then <strong>fixes</strong> binary variables at hours more than 24h from any transition:
@@ -2584,7 +2758,7 @@ def solve_model(solver, model, *, tee=True):
 <li><code>run_costs</code>: exact economic running cost (uses actual <span class="arithmatex">\(P_{\text{eff}} \times \text{both\_on}\)</span> with DUO curves).</li>
 <li><code>run_costs_solver</code>: solver-consistent running cost (uses the linearised <code>duo_cost_adj</code> parameter).</li>
 <li><code>duo_linearization_error</code>: difference between exact and solver-consistent costs (<code>run_costs − run_costs_solver</code>).</li>
-<li><code>start_cost</code>: start-up cost based on tier.  The extraction reconstructs start-up costs using only the three feasible tiers: <strong>warm</strong> (offline &lt; 60 h), <strong>cold</strong> (offline 60–99 h), and <strong>very cold</strong> (offline ≥ 100 h).  Although the Pyomo model carries a <em>hot</em> variable (5–10 h offline), the result extraction merges it into the warm bucket because its practical distinction is negligible in the dispatched schedule.</li>
+<li><code>start_cost</code>: start-up cost based on tier.  The extraction reconstructs start-up costs using all four feasible tiers: <strong>hot</strong> (offline &lt; 10 h), <strong>warm</strong> (offline 10–59 h), <strong>cold</strong> (offline 60–99 h), and <strong>very cold</strong> (offline ≥ 100 h).  The hot tier threshold of 10 h matches the Pyomo model's <code>on[b, t-10]</code> lookback constraint that identifies hot starts.</li>
 <li><code>OFF_costs</code>: computed from the OFF-cost formula (see Section 3.3).</li>
 <li><code>DOW_rev</code>: DOW revenue for this hour.</li>
 <li><code>coal_consumption</code>: computed from coal curves.</li>
@@ -2604,6 +2778,29 @@ def solve_model(solver, model, *, tee=True):
 <pre><code>Obj/PnL delta: 0.00 EUR  (Obj=85,367,973.45  PnL=85,367,973.45)
 Pyomo audit: all components match (delta &lt; 0.01)
 </code></pre>
+<ol>
+<li><strong>Coal DUO linearisation diagnostic</strong>: after the audit, the model prints a monthly table comparing the solver's linearised coal consumption (<code>coal_solver</code>) with the exact post-solve coal consumption (<code>coal_exact</code>) for every coal-constrained month.  This diagnostic detects months where the DUO linearisation causes the solver to <strong>undercount coal</strong> relative to the real consumption, potentially allowing schedules that violate the coal limit in reality even though they appear feasible to the solver.</li>
+</ol>
+<p>A typical diagnostic output:</p>
+<pre><code>================================================================================
+COAL DUO LINEARISATION DIAGNOSTIC (monthly)
+================================================================================
+     Month    Solver [t]     Exact [t]   Error [t]     Limit [t]  Status
+--------------------------------------------------------------------------------
+  2026-04          46,129        46,171         +42        46,129  !! EXACT EXCEEDS LIMIT (solver blind)
+  2026-05         124,037       124,037          +0       124,037  ! BOTH EXCEED LIMIT
+  2026-10         299,329       299,434        +105       299,329  !! EXACT EXCEEDS LIMIT (solver blind)
+  2026-11         343,409       343,131        -277       343,408  ok (error &gt; 1t)
+
+  Horizon total coal error: -599.6 t  (2295 DUO hours)
+================================================================================
+</code></pre>
+<p>The <strong>status</strong> column flags three cases:
+- <strong>"ok"</strong>: both solver and exact coal are within the limit (error may be non-zero but harmless).
+- <strong>"!! EXACT EXCEEDS LIMIT (solver blind)"</strong>: the solver-consistent coal is within the limit but the exact coal exceeds it — the solver approved a schedule it should have rejected.
+- <strong>"! BOTH EXCEED LIMIT"</strong>: both values exceed the limit — the <code>COAL_TOLERANCE</code> slack allowed the solver to slightly overshoot.</p>
+<p>Per-block errors are also printed when they exceed ±1 tonne, helping identify which block's DUO linearisation is the primary source of error.</p>
+<p>The diagnostic runs after every solve (including each re-linearisation pass), so the user can observe how the coal error shrinks as the linearisation point is tightened.  If "solver blind" months persist after all re-linearisation passes, increasing <code>RELINEARIZE_MAX_ITERS</code> or tightening <code>COAL_TOLERANCE</code> is recommended.</p>
 <h4>Step 10 — Report generation (<code>reporting.py</code> → <code>write_excel()</code>)</h4>
 <p>The final step writes a multi-sheet Excel workbook:</p>
 <table>

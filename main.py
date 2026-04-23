@@ -207,6 +207,20 @@ def _duo_cost_sum(m) -> float:
     return total
 
 
+def _duo_coal_sum(m) -> float:
+    """Sum of DUO coal adjustments across all blocks and hours (from solved model)."""
+    if not getattr(m, "duo_coal_adj", None):
+        return 0.0
+    total = 0.0
+    for b in m.B:
+        for t in m.T:
+            adj = float(value(m.duo_coal_adj[b, t]))
+            bo = value(m.both_on[t])
+            bo = float(bo) if bo is not None else 0.0
+            total += adj * bo
+    return total
+
+
 def main() -> None:
     # ----------------------------------------------------------------
     #  MOSEK licence check
@@ -288,6 +302,7 @@ def main() -> None:
             _m_fix_ref = m1  # reference model for _fix_tiers_from_hint
             _prev_obj = float(value(m.obj))
             _prev_duo_cost = _duo_cost_sum(m)
+            _prev_duo_coal = _duo_coal_sum(m)
             for _relin_iter in range(cfg.RELINEARIZE_MAX_ITERS):
                 print(f"\n--- Re-linearization pass {_relin_iter + 1}/{cfg.RELINEARIZE_MAX_ITERS}")
                 _pnom = {(b, t): float(value(m.P_eff[b, t]))
@@ -305,17 +320,21 @@ def main() -> None:
                 # --- Convergence check ---
                 _cur_obj = float(value(m.obj))
                 _cur_duo_cost = _duo_cost_sum(m)
+                _cur_duo_coal = _duo_coal_sum(m)
                 _d_obj = abs(_cur_obj - _prev_obj)
                 _d_duo = abs(_cur_duo_cost - _prev_duo_cost)
+                _d_coal = abs(_cur_duo_coal - _prev_duo_coal)
                 print(f"    |Δ obj| = {_d_obj:,.0f} EUR  "
                       f"(tol {cfg.RELIN_OBJ_TOL:,.0f})")
                 print(f"    |Δ DUO cost| = {_d_duo:,.0f} EUR  "
                       f"(tol {cfg.RELIN_DUO_COST_TOL:,.0f})")
+                print(f"    |Δ DUO coal| = {_d_coal:,.1f} t")
                 if _d_obj < cfg.RELIN_OBJ_TOL and _d_duo < cfg.RELIN_DUO_COST_TOL:
                     print(f"    Converged after {_relin_iter + 1} pass(es).")
                     break
                 _prev_obj = _cur_obj
                 _prev_duo_cost = _cur_duo_cost
+                _prev_duo_coal = _cur_duo_coal
 
         else:
             m = build_model(df, cost_meta)
