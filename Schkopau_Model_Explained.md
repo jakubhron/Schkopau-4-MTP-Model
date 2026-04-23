@@ -356,11 +356,36 @@ $$\varepsilon_{b,t} = \Delta\text{slope}_{b,t} \times (P_{\text{eff},b,t} - P_{\
 
 This error is zero when $P_{\text{eff}} = P_{\text{nom}}$ and grows linearly with the deviation.  In practice, with $|\Delta\text{slope}| \approx 2$ EUR/MWh and $|P_{\text{eff}} - P_{\text{nom}}| \lesssim 150$ MW, the hourly error is at most ~300 EUR — negligible against hourly revenues of 20 000–40 000 EUR.  Summed over the full horizon, the total linearisation error is typically **100–200K EUR** (0.3–0.5% of total PnL).
 
-To minimise this error, the model uses **`pnom_hint`**: after Stage 1 solves, each block's per-hour $P_{\text{eff}}$ values are passed to Stage 2 as $P_{\text{nom}}$, giving a tighter linearisation.  An optional iterative re-linearisation loop (`RELINEARIZE_ITERS` in config) can further refine this by re-solving with updated $P_{\text{nom}}$ from the previous Stage 2 solution.
+To minimise this error, the model uses **sequential centre-point updating**:
 
-#### Why not use McCormick / P_eff_duo?
+1. **Stage 1 → Stage 2**: after Stage 1 solves, each block's per-hour $P_{\text{eff}}$ values are passed to Stage 2 as $P_{\text{nom}}$ via `pnom_hint`, giving a tighter linearisation than the generic midpoint.
+2. **Iterative re-linearisation** (`RELINEARIZE_MAX_ITERS` in config): after Stage 2, the solve loop can run additional passes.  Each pass extracts the current $P_{\text{eff}}$ values, rebuilds the model with updated `pnom_hint`, copies integer hints from the previous solution, and re-solves.
 
-An earlier version of the model used McCormick envelope constraints to create an auxiliary variable $P_{\text{eff\_duo}} = P_{\text{eff}} \times \text{both\_on}$, giving an exact representation.  However, this approach introduced 3 extra constraints per block per hour (36,726 additional constraints), significantly slowing the solver.  The pre-linearised approach achieves nearly identical results (~0.3% error) with zero additional variables and a single parameter per block per hour, making solves **2–3× faster**.
+**Critically, the variable fixings stay anchored to Stage 1 throughout all re-linearisation passes.**  `_fix_tiers_from_hint` always uses the Stage 1 model (`m1`) as its reference — not the latest re-linearised solve.  This ensures that the search space (which `on`/`startup`/tier variables are fixed vs free) remains identical across passes.  Because the fixings don't change, the warm-start values injected by `_copy_integer_hint` remain consistent and MOSEK can accept the hint immediately, starting each pass with a proven-good integer solution.
+
+The loop uses a **convergence-based stopping rule** rather than a fixed iteration count.  It terminates early when both:
+- $|\Delta\text{objective}| < \text{RELIN\_OBJ\_TOL}$ (default: 5 000 EUR)
+- $|\Delta\text{DUO cost sum}| < \text{RELIN\_DUO\_COST\_TOL}$ (default: 2 000 EUR)
+
+This keeps the MIP compact while iteratively tightening the DUO approximation only as long as meaningful improvement is being made.
+
+#### Solver-consistent vs post-solve exact costs
+
+An important consequence of the linearisation is that the solver's objective uses the *approximate* DUO cost (via `duo_cost_adj`), while the true economic cost depends on the *actual* $P_{\text{eff}}$ at each hour.  The reports therefore provide **two cost views**:
+
+| Column | Definition | Use |
+|--------|------------|-----|
+| `run_costs` | Exact: mono base + $\Delta\text{slope} \times P_{\text{eff}} \times \text{both\_on} + \Delta\text{fixed} \times \text{both\_on}$ | Economic P&L, settlement |
+| `run_costs_solver` | Solver-consistent: mono base + `duo_cost_adj` $\times$ `both_on` | Matches the objective the solver actually optimised |
+| `duo_linearization_error` | `run_costs` − `run_costs_solver` | Quantifies the approximation gap per hour |
+
+The `DUO linearization error` row in the Monthly summary sheet shows the total error aggregated by month.  A small value (typically < 0.5% of PnL) confirms the linearisation is adequate; a large value would motivate increasing `RELINEARIZE_MAX_ITERS`.
+
+#### Design decision: why linearisation, not exact McCormick
+
+An exact $P_{\text{eff}} \times \text{both\_on}$ formulation was tested using McCormick envelope constraints to create an auxiliary variable $P_{\text{eff\_duo}} = P_{\text{eff}} \times \text{both\_on}$.  However, this approach introduced 3 extra constraints per block per hour (36,726 additional constraints), significantly slowing the solver.  The pre-linearised approach achieves nearly identical results (~0.3% error) with zero additional variables and a single parameter per block per hour, making solves **2–3× faster**.
+
+The production model therefore uses pointwise linearised DUO adjustment, optionally refined through sequential re-linearisation.  Reports contain both solver-consistent and post-solve corrected economics so the approximation is always transparent.
 
 #### Worked example — Block A, winter hour, both blocks on
 
@@ -1720,7 +1745,15 @@ results = solve_model(solver, m, tee=True)         <span class="c8"># solve full
 
 - **`_fix_tiers_from_hint(m, m1, window=24)`** — Identifies transition points (on→off and off→on) in Stage 1's solution and **fixes** the integer variables (`on`, `startup`, tier indicators) at all hours more than 24h from any transition.  This dramatically reduces the number of free binary variables (typically from 61K → 20K) while keeping flexibility around startups/shutdowns.
 
-**Optional: iterative re-linearisation** — If `RELINEARIZE_ITERS > 0`, the solve pipeline runs additional passes after Stage 2.  Each pass extracts the current $P_{\text{eff}}$ values, rebuilds the model with updated `pnom_hint`, copies integer hints from the previous solution, and re-solves.  This is rarely needed — the default is `RELINEARIZE_ITERS = 0`.
+**Optional: iterative re-linearisation** — If `RELINEARIZE_MAX_ITERS > 0`, the solve pipeline runs additional passes after Stage 2.  Each pass:
+
+1. Extracts the current $P_{\text{eff}}$ values as the new `pnom_hint`.
+2. Rebuilds the model with updated DUO linearisation.
+3. Copies integer hints from the previous solution.
+4. **Applies `_fix_tiers_from_hint` using Stage 1 (`m1`) as the fixed reference** — not the latest solve.  This keeps the variable-fixing skeleton constant so the warm-start stays feasible.
+5. Re-solves.
+
+The loop uses a **convergence-based stopping rule**: it terminates early when both $|\Delta\text{objective}| < \text{RELIN\_OBJ\_TOL}$ and $|\Delta\text{DUO cost}| < \text{RELIN\_DUO\_COST\_TOL}$.  This avoids wasted passes when the linearisation is already tight, and guarantees that additional passes only occur when they provide meaningful improvement.
 
 The key step is `_copy_integer_hint(m1, m)`.  This function loops through every binary/integer variable in Stage 1's solved model and copies its value to the corresponding variable in Stage 2.  It skips variables that are *fixed* in the source (e.g. `in_ramp` fixed to 0 in simple-ramp mode — these are model constants, not MIP decisions) and respects initial-condition locks in the destination.
 
@@ -1860,8 +1893,10 @@ Described in full detail in **Section 7.3**.  Produces two dictionaries:
 - `P_A`, `P_B`: power output (MW).
 - `startup_A`, `startup_B`: whether a start occurred.
 - `revenue`: `P × Price`.
-- `run_costs`: from the Pyomo variable.
-- `start_cost`: start-up cost based on tier.
+- `run_costs`: exact economic running cost (uses actual $P_{\text{eff}} \times \text{both\_on}$ with DUO curves).
+- `run_costs_solver`: solver-consistent running cost (uses the linearised `duo_cost_adj` parameter).
+- `duo_linearization_error`: difference between exact and solver-consistent costs (`run_costs − run_costs_solver`).
+- `start_cost`: start-up cost based on tier.  The extraction reconstructs start-up costs using only the three feasible tiers: **warm** (offline < 60 h), **cold** (offline 60–99 h), and **very cold** (offline ≥ 100 h).  Although the Pyomo model carries a *hot* variable (5–10 h offline), the result extraction merges it into the warm bucket because its practical distinction is negligible in the dispatched schedule.
 - `OFF_costs`: computed from the OFF-cost formula (see Section 3.3).
 - `DOW_rev`: DOW revenue for this hour.
 - `coal_consumption`: computed from coal curves.
@@ -1919,7 +1954,9 @@ All parameters are defined in `schkopau_mtp/config.py`.  Changing a parameter on
 | `DUAL_BLOCK_BOOST` | 5 MW | Extra capacity each block gets when both run simultaneously. |
 | `START_MARGIN_MIN` | 0 EUR | Flat amount added to every start-up cost (safety margin for wear-and-tear uncertainty). |
 | `SOLVE_MODE` | `"staged_ramp"` | Controls startup-ramp fidelity and warm-start staging: `"simple"`, `"full"`, or `"staged_ramp"` (recommended).  See **Section 4.9** for details. |
-| `RELINEARIZE_ITERS` | 0 | Number of iterative DUO re-linearisation passes after Stage 2.  0 = no iteration; the Stage 1 `pnom_hint` is usually sufficient. |
+| `RELINEARIZE_MAX_ITERS` | 0 | Maximum iterative DUO re-linearisation passes after Stage 2.  The loop stops early when objective and DUO cost changes fall below `RELIN_OBJ_TOL` / `RELIN_DUO_COST_TOL`. |
+| `RELIN_OBJ_TOL` | 5 000 EUR | Convergence threshold: stop re-linearisation when objective change is below this. |
+| `RELIN_DUO_COST_TOL` | 2 000 EUR | Convergence threshold: stop re-linearisation when DUO cost sum change is below this. |
 | `OFFLINE_FIXED_PENALTY_NO_DOW` | 3 420 EUR/h | Fixed hourly penalty charged when the plant is offline in DOW-OFF mode (replaces the DOW-related OFF costs). |
 | `DEFAULT_GRIDFEE` | 23.6 EUR/MWh | Grid fee used when the input file does not specify one. |
 

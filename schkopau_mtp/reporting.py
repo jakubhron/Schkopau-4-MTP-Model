@@ -94,7 +94,8 @@ def write_excel(
                            "coal_slope", "coal_fixed",
                            "cost_slope_duo", "cost_fixed_duo",
                            "coal_slope_duo", "coal_fixed_duo",
-                           "TC_PminN_duo", "TC_Pmax_duo")
+                           "TC_PminN_duo", "TC_Pmax_duo",
+                           "duo_cost_adj")
             for b in cfg.BLOCKS
         ]
         df_out = df_out.drop(columns=[c for c in _internal_cols if c in df_out.columns])
@@ -583,6 +584,9 @@ def _write_monthly_sheet(
     )
     mv["PnL"] = mv["Total Revenues (TOTAL)"].sub(mv["Total Costs (TOTAL)"], fill_value=0.0)
 
+    # DUO linearization error (exact - solver-consistent run costs)
+    mv["DUO linearization error"] = msum("duo_linearization_error")
+
     # Solver PnL total
     mv["Total"] = msum("PnL")
 
@@ -701,6 +705,7 @@ def _define_output_rows() -> List[Tuple[str, str | None, str | None]]:
         ("    House Power", "EUR", "House Power"),
         ("Total Costs (TOTAL)", "EUR", "Total Costs (TOTAL)"),
         ("PnL", "EUR", "PnL"),
+        ("DUO linearization error", "EUR", "DUO linearization error"),
         ("", None, None),
         # --- OPERATION STATISTICS ---
         ("Operation Statistics", None, None),

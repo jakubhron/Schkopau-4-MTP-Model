@@ -77,8 +77,8 @@ SKIP_SOLVE_AND_EXTRACT = False
 #                   SOLVER SETTINGS
 # ============================================================
 USE_MOSEK = True
-MOSEK_MIO_TOL_REL_GAP = "0.03"    # 3 % MIP gap
-MOSEK_MIO_MAX_TIME = "2500"         # max 25 minutes
+MOSEK_MIO_TOL_REL_GAP = "0.04"    # 3 % MIP gap
+MOSEK_MIO_MAX_TIME = "600"         # max 10 minutes
 
 # ============================================================
 #                   PLANT CONSTRAINTS
@@ -105,10 +105,18 @@ MAX_RAMP_HOURS = 3       # maximum startup ramp duration [h]
 # Coal constraints are toggled independently via USE_COAL_CONSTRAINS.
 SOLVE_MODE = "staged_ramp"
 
-# Number of iterative re-linearization passes in Stage 2.
+# Maximum iterative re-linearization passes in Stage 2.
 # 0 = no iteration (single Stage 2 solve with Stage 1 hint).
 # Each pass re-linearises DUO at the previous Stage 2 P_eff values.
-RELINEARIZE_ITERS = 0
+# The loop stops early when convergence criteria are met.
+RELINEARIZE_MAX_ITERS = 3
+
+# Convergence tolerances for the re-linearization stopping rule.
+# The loop terminates when ALL of:
+#   |Δ objective| < RELIN_OBJ_TOL  (EUR)
+#   total |Δ DUO run cost| < RELIN_DUO_COST_TOL  (EUR)
+RELIN_OBJ_TOL = 50_000.0       # EUR – stop if objective moves less than this
+RELIN_DUO_COST_TOL = 20_000.0   # EUR – stop if DUO-adjusted cost sum changes by less
 
 # Internal flag toggled by main.py during staged solves.  Do not set directly.
 USE_SIMPLE_STARTUP_RAMP = SOLVE_MODE == "simple"

@@ -108,6 +108,11 @@ def _extract_decision_variables(df: pd.DataFrame, m) -> pd.DataFrame:
             _round_binary(m.shutdown[b, t]) if t > 0 else 0 for t in m.T
         ]
 
+    # Extract solver's DUO linearisation parameter for post-hoc comparison
+    if getattr(m, "_has_duo", False):
+        for b in cfg.BLOCKS:
+            df[f"duo_cost_adj_{b}"] = [float(value(m.duo_cost_adj[b, t])) for t in m.T]
+
     # Plant-level aggregates (sum of blocks)
     df["P"] = sum(df[f"P_{b}"] for b in cfg.BLOCKS)
     df["on_model"] = (sum(df[f"on_model_{b}"] for b in cfg.BLOCKS) > 0).astype(int)
@@ -123,9 +128,13 @@ def _extract_decision_variables(df: pd.DataFrame, m) -> pd.DataFrame:
 
 
 def _compute_tiered_start_cost(on_series, startup_series, tiers, initial_on=1):
-    """Compute startup cost per hour matching the Pyomo 3-tier model.
+    """Compute startup cost per hour matching the Pyomo feasible tiers.
 
-    Tiers: hot (<10h), warm (10-60h), vcold (≥60h).
+    Feasible tiers (with MIN_DOWN ≥ 6):
+      warm   – offline < 60 h
+      cold   – offline 60–99 h
+      vcold  – offline ≥ 100 h
+
     Cost is assigned based on offline duration at startup.
     """
     on_arr = on_series.values
@@ -137,11 +146,11 @@ def _compute_tiered_start_cost(on_series, startup_series, tiers, initial_on=1):
         return pd.Series(costs, index=on_series.index)
 
     tier_map = {t["name"]: t for t in tiers}
-    hot_cost = tier_map.get("hot", {}).get("cost", 0.0)
     warm_cost = tier_map.get("warm", {}).get("cost", 0.0)
+    cold_cost = tier_map.get("cold", {}).get("cost", warm_cost)
     vcold_cost = tier_map.get("vcold", {}).get("cost", warm_cost)
-    hot_thresh = 10
-    vcold_thresh = 60
+    cold_thresh = 60
+    vcold_thresh = 100
 
     # If the block was ON before the horizon, off_count starts at 0 (just turned on).
     # If it was OFF, we don't know how long — assume very cold (large off_count).
@@ -153,8 +162,8 @@ def _compute_tiered_start_cost(on_series, startup_series, tiers, initial_on=1):
             if int(round(su_arr[i])) == 1:
                 if off_count >= vcold_thresh:
                     costs[i] = vcold_cost
-                elif off_count < hot_thresh:
-                    costs[i] = hot_cost
+                elif off_count >= cold_thresh:
+                    costs[i] = cold_cost
                 else:
                     costs[i] = warm_cost
             off_count = 0
@@ -197,20 +206,34 @@ def _compute_pnl(df: pd.DataFrame, cost_meta: dict) -> pd.DataFrame:
 
         _cs = df[f"cost_slope_{b}"]
         _cf = df[f"cost_fixed_{b}"]
-        rc = _cs * P_eff_b + _cf * on_b
+        rc_mono = _cs * P_eff_b + _cf * on_b
 
-        # DUO cost adjustment: when both blocks ON, use DUO cost curves
+        # --- Exact DUO cost (post-solve, uses actual P_eff × both_on) ---
         _cs_duo_col = f"cost_slope_duo_{b}"
-        if cost_meta.get("has_duo", False) and _cs_duo_col in df.columns:
+        _has_duo = cost_meta.get("has_duo", False) and _cs_duo_col in df.columns
+        if _has_duo:
             _cs_duo = pd.to_numeric(df[_cs_duo_col], errors="coerce").fillna(0.0)
             _cf_duo = pd.to_numeric(df[f"cost_fixed_duo_{b}"], errors="coerce").fillna(0.0)
             _both = 1
             for _bb in cfg.BLOCKS:
                 _both = _both * df[f"on_model_{_bb}"]
-            rc += (_cs_duo - _cs) * P_eff_b * _both + (_cf_duo - _cf) * _both
+            rc_exact = rc_mono + (_cs_duo - _cs) * P_eff_b * _both + (_cf_duo - _cf) * _both
+        else:
+            _both = 0
+            rc_exact = rc_mono
 
-        df[f"run_costs_{b}"] = rc
-        total_run_costs += rc
+        df[f"run_costs_{b}"] = rc_exact
+        total_run_costs += rc_exact
+
+        # --- Solver-consistent DUO cost (linearised duo_cost_adj × both_on) ---
+        _adj_col = f"duo_cost_adj_{b}"
+        if _has_duo and _adj_col in df.columns:
+            rc_solver = rc_mono + df[_adj_col] * _both
+            df[f"run_costs_solver_{b}"] = rc_solver
+            df[f"duo_linearization_error_{b}"] = rc_exact - rc_solver
+        else:
+            df[f"run_costs_solver_{b}"] = rc_exact
+            df[f"duo_linearization_error_{b}"] = 0.0
 
         # Tiered startup cost: compute offline duration at each startup
         sc = _compute_tiered_start_cost(on_b, df[f"startup_{b}"], starts.get(b, []),
@@ -224,6 +247,8 @@ def _compute_pnl(df: pd.DataFrame, cost_meta: dict) -> pd.DataFrame:
 
     # Plant-level aggregates
     df["run_costs"] = total_run_costs
+    df["run_costs_solver"] = sum(df[f"run_costs_solver_{b}"] for b in cfg.BLOCKS)
+    df["duo_linearization_error"] = sum(df[f"duo_linearization_error_{b}"] for b in cfg.BLOCKS)
     df["start_cost"] = total_start_cost
     df["profit_spot"] = total_profit_spot
 
@@ -382,17 +407,20 @@ def _print_pyomo_component_audit(df, m, obj_val_global, cost_meta=None):
     """Compare Pyomo-evaluated term sums vs DataFrame term sums (solve only)."""
     starts = (cost_meta or {}).get("starts", {})
 
-    # Pre-compute per-block tiered costs (3 tiers)
+    # Pre-compute per-block tiered costs (warm baseline + hot/cold/vcold deltas)
     _warm_cost = {}
     _hot_delta = {}
+    _cold_delta = {}
     _vcold_delta = {}
     for b in cfg.BLOCKS:
         tiers = {t["name"]: t for t in starts.get(b, [])}
         hc = tiers.get("hot", {}).get("cost", 47_510.0)
         wc = tiers.get("warm", {}).get("cost", 38_291.0)
+        cc = tiers.get("cold", {}).get("cost", 39_910.0)
         vc = tiers.get("vcold", {}).get("cost", 60_251.0)
         _warm_cost[b] = wc
         _hot_delta[b] = hc - wc
+        _cold_delta[b] = cc - wc
         _vcold_delta[b] = vc - wc
 
     def _v(x):
@@ -412,6 +440,7 @@ def _print_pyomo_component_audit(df, m, obj_val_global, cost_meta=None):
             start_cost = (
                 _warm_cost[b] * _v(m.startup[b, t])
                 + _hot_delta[b] * _v(m.hot_start[b, t])
+                + _cold_delta[b] * _v(m.cold_start[b, t])
                 + _vcold_delta[b] * _v(m.vcold_start[b, t])
             )
 
