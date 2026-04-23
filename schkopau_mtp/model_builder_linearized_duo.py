@@ -34,7 +34,7 @@ from . import config as cfg
 # ====================================================================
 
 
-def build_model(df: pd.DataFrame, cost_meta: dict, *, pnom_hint: dict | None = None) -> ConcreteModel:
+def build_model(df: pd.DataFrame, cost_meta: dict) -> ConcreteModel:
     """
     Construct a fully parameterised Pyomo ConcreteModel for blocks A+B.
 
@@ -45,10 +45,6 @@ def build_model(df: pd.DataFrame, cost_meta: dict, *, pnom_hint: dict | None = N
         Block-specific columns are suffixed ``_A``, ``_B``.
     cost_meta : dict
         Contains per-block ``Pmax_eff_A``, ``Pmax_eff_B``.
-    pnom_hint : dict, optional
-        Per-hour Pnom values ``{(block, t): float}`` from a previous solve.
-        When provided, the DUO linearisation uses these instead of the
-        midpoint ``(Pmin + Pmax_eff) / 2``, giving a tighter approximation.
 
     Returns
     -------
@@ -93,12 +89,11 @@ def build_model(df: pd.DataFrame, cost_meta: dict, *, pnom_hint: dict | None = N
     m.cost_fixed = Param(m.B, m.T, initialize=_bt_dict("cost_fixed"))
 
     # DUO cost parameters (dual-block operation — different efficiencies)
-    # Linearised at Pnom to avoid bilinear P_eff × on[other] products.
-    # When pnom_hint is given (from a previous stage), use per-hour P_eff
-    # values for a tighter fit; otherwise fall back to midpoint.
+    # Linearised at nominal power Pnom = (Pmin + Pmax_eff) / 2 to avoid
+    # bilinear P_eff × on[other] products that destroy LP relaxation quality.
     # Exact: Δslope × P_eff × on[other] + Δfixed × on[other]
     # Approx: (Δslope × Pnom + Δfixed) × on[other]   — purely linear!
-    # Error ≈ Δslope × (P_eff - Pnom).  Reported PnL uses exact DUO curves.
+    # Error ≈ Δslope × (P_eff - Pnom) — second-order small.
     _has_duo = cost_meta.get("has_duo", False)
     m._has_duo = _has_duo
     if _has_duo:
@@ -115,11 +110,8 @@ def build_model(df: pd.DataFrame, cost_meta: dict, *, pnom_hint: dict | None = N
                 for t in range(T_len):
                     ds = float(duo_slope[t]) - float(mono_slope[t])
                     df_ = float(duo_fixed[t]) - float(mono_fixed[t])
-                    if pnom_hint is not None and (b, t) in pnom_hint:
-                        pnom = pnom_hint[(b, t)]
-                    else:
-                        pmin_bt = float(idx.iloc[t][f"Pmin_{b}"])
-                        pnom = (pmin_bt + pmax_eff_b) / 2.0
+                    pmin_bt = float(idx.iloc[t][f"Pmin_{b}"])
+                    pnom = (pmin_bt + pmax_eff_b) / 2.0
                     _duo_cost_adj[(b, t)] = ds * pnom + df_
             else:
                 for t in range(T_len):
@@ -239,11 +231,8 @@ def build_model(df: pd.DataFrame, cost_meta: dict, *, pnom_hint: dict | None = N
                     for t in range(T_len):
                         ds = float(duo_s[t]) - float(mono_s[t])
                         df_ = float(duo_f[t]) - float(mono_f[t])
-                        if pnom_hint is not None and (b, t) in pnom_hint:
-                            pnom = pnom_hint[(b, t)]
-                        else:
-                            pmin_bt = float(idx.iloc[t][f"Pmin_{b}"])
-                            pnom = (pmin_bt + pmax_eff_b) / 2.0
+                        pmin_bt = float(idx.iloc[t][f"Pmin_{b}"])
+                        pnom = (pmin_bt + pmax_eff_b) / 2.0
                         _duo_coal_adj[(b, t)] = ds * pnom + df_
                 else:
                     for t in range(T_len):
@@ -283,7 +272,7 @@ def build_model(df: pd.DataFrame, cost_meta: dict, *, pnom_hint: dict | None = N
                 # DUO adjustment: linearised at Pnom per hour
                 if _duo:
                     expr += sum(
-                        m.duo_coal_adj[b, t] * m.both_on[t]
+                        m.duo_coal_adj[b, t] * m.on[_other_b[b], t]
                         for b in m.B for t in hours
                     )
                 return expr <= m.coal_limit_t[y, mo]
@@ -692,11 +681,13 @@ def warm_start_heuristic(m) -> None:
             m.P_eff[b, t].value = p_eff
 
             # run_costs = cost_slope * P_eff + cost_fixed * on
-            #           + duo_cost_adj * both_on   (linearised DUO)
+            #           + duo_cost_adj * on[other]   (linearised DUO)
             rc = (float(value(m.cost_slope[b, t])) * p_eff
                   + float(value(m.cost_fixed[b, t])) * on_val)
             if m._has_duo:
-                rc += float(value(m.duo_cost_adj[b, t])) * both_on_val
+                other_b = [bb for bb in B_list if bb != b][0]
+                other_on = round(m.on[other_b, t].value or 0)
+                rc += float(value(m.duo_cost_adj[b, t])) * other_on
             m.run_costs[b, t].value = rc
 
     # --- Final coal clamp: catch residual overshoots after P_eff finalisation ---
@@ -716,11 +707,11 @@ def warm_start_heuristic(m) -> None:
                     if on_val == 1:
                         p_eff = m.P_eff[b, t].value or 0.0
                         other_b = [bb for bb in B_list if bb != b][0]
-                        both_on_v = round(m.both_on[t].value or 0)
+                        other_on = round(m.on[other_b, t].value or 0)
                         c = (float(value(m.coal_slope[b, t])) * p_eff
                              + float(value(m.coal_fixed[b, t])))
                         if m._has_duo:
-                            c += float(value(m.duo_coal_adj[b, t])) * both_on_v
+                            c += float(value(m.duo_coal_adj[b, t])) * other_on
                         coal_total += c
                         p_val = m.P[b, t].value or 0.0
                         pmin = float(value(m.Pmin[b, t]))
@@ -760,18 +751,19 @@ def warm_start_heuristic(m) -> None:
                 if p_eff > peff_ub:
                     p_eff = peff_ub
                 m.P_eff[b, t].value = p_eff
-                both_v = round(m.both_on[t].value or 0)
+                other_b = [bb for bb in B_list if bb != b][0]
+                other_on = round(m.on[other_b, t].value or 0)
                 rc = (float(value(m.cost_slope[b, t])) * p_eff
                       + float(value(m.cost_fixed[b, t])) * on_val)
                 if m._has_duo:
-                    rc += float(value(m.duo_cost_adj[b, t])) * both_v
+                    rc += float(value(m.duo_cost_adj[b, t])) * other_on
                 m.run_costs[b, t].value = rc
 
             new_coal = sum(
                 (float(value(m.coal_slope[b, t])) * (m.P_eff[b, t].value or 0.0)
                  + float(value(m.coal_fixed[b, t])) * round(m.on[b, t].value or 0)
                  + (float(value(m.duo_coal_adj[b, t]))
-                    * round(m.both_on[t].value or 0)
+                    * round(m.on[[bb for bb in B_list if bb != b][0], t].value or 0)
                     if m._has_duo else 0.0))
                 for b in B_list for t in hours
             )
@@ -891,10 +883,8 @@ def _add_cost_constraints(m) -> None:
     def cost_rule(m, b, t):
         expr = m.cost_slope[b, t] * m.P_eff[b, t] + m.cost_fixed[b, t] * m.on[b, t]
         if _duo:
-            # DUO adjustment — linearised: duo_cost_adj × both_on
-            # Must use both_on (not on[other]) so the DUO charge is zero
-            # when this block is off.
-            expr += m.duo_cost_adj[b, t] * m.both_on[t]
+            # DUO adjustment — linearised: duo_cost_adj × on[other_block]
+            expr += m.duo_cost_adj[b, t] * m.on[_other_b[b], t]
         return m.run_costs[b, t] == expr
 
     m.cost_def = Constraint(m.B, m.T, rule=cost_rule)

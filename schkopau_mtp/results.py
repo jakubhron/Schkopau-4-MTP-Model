@@ -97,6 +97,8 @@ def _extract_decision_variables(df: pd.DataFrame, m) -> pd.DataFrame:
             p = value(m.P[b, t])
             if p is None or abs(p) < EPS:
                 p = 0.0
+            elif p < 0:
+                p = 0.0  # clamp solver float noise
             P_vals.append(p)
         df[f"P_{b}"] = P_vals
 
@@ -167,6 +169,7 @@ def _compute_tiered_start_cost(on_series, startup_series, tiers, initial_on=1):
 
 def _compute_pnl(df: pd.DataFrame, cost_meta: dict) -> pd.DataFrame:
     """Compute all hourly PnL components matching the Pyomo objective."""
+    df = df.copy()  # defragment before adding many computed columns
     starts = cost_meta.get("starts", {})
 
     # Per-block run costs

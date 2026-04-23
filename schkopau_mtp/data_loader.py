@@ -51,6 +51,7 @@ def load_and_prepare() -> Tuple[pd.DataFrame, dict]:
     coal_limits = _read_coal_constrains_tab() if cfg.USE_COAL_CONSTRAINS else {}
 
     meta = {**cost_meta, "starts": starts_data, "coal_limits": coal_limits}
+    df = df.copy()  # defragment after all incremental column assignments
     return df, meta
 
 
@@ -267,6 +268,7 @@ def _read_duo_tabs(df: pd.DataFrame) -> Tuple[pd.DataFrame, dict]:
 
     Returns the enriched DataFrame and a dict ``{"has_duo": True/False}``.
     """
+    df = df.copy()  # defragment before adding many DUO columns
     import shutil, tempfile
 
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".xlsx")

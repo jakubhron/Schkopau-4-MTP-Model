@@ -274,6 +274,8 @@ def _prepare_monthly_columns(
         co2_factor = _pw2_blk(p_eff_blk, _co2_pminn, _co2_pmax, p1_blk, p2_blk)
         coal_factor = _pw2_blk(p_eff_blk, _coal_pminn, _coal_pmax, p1_blk, p2_blk)
 
+        coal_t_direct = coal_factor * p_eff_blk
+
         _api2_col = (
             "API2 EUR/t" if "API2 EUR/t" in df_m.columns
             else ("API2" if "API2" in df_m.columns
@@ -445,22 +447,25 @@ def _prepare_monthly_columns(
     _dow_MW = _s(df_m, "DOW", 0.0).clip(lower=0.0) * (_on >= 0.5).astype(float)
     df_m["DOW_GWh_h"] = _dow_MW / 1000.0
 
-    # --- Merchant / DOW split (no must-run / profitable breakdown) ---
+    # --- Merchant / DOW split ---
+    # When USE_DOW_OPPORTUNITY_COSTS=False the model only computes coal for
+    # electrical output (P_eff = P), so all coal is merchant coal — no DOW split.
     _price = _s(df_m, "Price", 0.0)
     _merchant_MW = _s(df_m, "P", 0.0).clip(lower=0.0)
 
     df_m["Merchant_GWh_h"] = _merchant_MW / 1000.0
 
-    _den = (_merchant_MW + _dow_MW).replace(0.0, np.nan)
+    _dow_MW_for_split = _dow_MW if cfg.USE_DOW_OPPORTUNITY_COSTS else pd.Series(0.0, index=df_m.index)
+    _den = (_merchant_MW + _dow_MW_for_split).replace(0.0, np.nan)
 
     _coal_t_h = _s(df_m, "Coal_t_h_implied_from_solver", _s(df_m, "Coal_t_h", 0.0))
     _co2_t_h = _s(df_m, "CO2_t_h_implied_from_solver", _s(df_m, "CO2_t_h", 0.0))
 
     df_m["Coal_kMT_h_Merchant"] = (_coal_t_h * (_merchant_MW / _den)).fillna(0.0) / 1000.0
-    df_m["Coal_kMT_h_DOW"] = (_coal_t_h * (_dow_MW / _den)).fillna(0.0) / 1000.0
+    df_m["Coal_kMT_h_DOW"] = (_coal_t_h * (_dow_MW_for_split / _den)).fillna(0.0) / 1000.0
 
     df_m["CO2_kMT_h_Merchant"] = (_co2_t_h * (_merchant_MW / _den)).fillna(0.0) / 1000.0
-    df_m["CO2_kMT_h_DOW"] = (_co2_t_h * (_dow_MW / _den)).fillna(0.0) / 1000.0
+    df_m["CO2_kMT_h_DOW"] = (_co2_t_h * (_dow_MW_for_split / _den)).fillna(0.0) / 1000.0
 
     # EUR breakdown
     _cost_api2 = _s(df_m, "Coal_API2_cost_solver_EUR_h", _s(df_m, "Coal_API2_cost_EUR_h", 0.0))
@@ -468,13 +473,13 @@ def _prepare_monthly_columns(
     _cost_co2 = _s(df_m, "CO2_cost_solver_EUR_h", _s(df_m, "CO2_cost_EUR_h", 0.0))
 
     df_m["Coal_API2_EUR_h_Merchant"] = (_cost_api2 * (_merchant_MW / _den)).fillna(0.0)
-    df_m["Coal_API2_EUR_h_DOW"] = (_cost_api2 * (_dow_MW / _den)).fillna(0.0)
+    df_m["Coal_API2_EUR_h_DOW"] = (_cost_api2 * (_dow_MW_for_split / _den)).fillna(0.0)
 
     df_m["Coal_other_EUR_h_Merchant"] = (_cost_other * (_merchant_MW / _den)).fillna(0.0)
-    df_m["Coal_other_EUR_h_DOW"] = (_cost_other * (_dow_MW / _den)).fillna(0.0)
+    df_m["Coal_other_EUR_h_DOW"] = (_cost_other * (_dow_MW_for_split / _den)).fillna(0.0)
 
     df_m["CO2_EUR_h_Merchant"] = (_cost_co2 * (_merchant_MW / _den)).fillna(0.0)
-    df_m["CO2_EUR_h_DOW"] = (_cost_co2 * (_dow_MW / _den)).fillna(0.0)
+    df_m["CO2_EUR_h_DOW"] = (_cost_co2 * (_dow_MW_for_split / _den)).fillna(0.0)
 
     df_m["Coal_kMT_h"] = _coal_t_h.fillna(0.0) / 1000.0
     df_m["CO2_kMT_h"] = _co2_t_h.fillna(0.0) / 1000.0

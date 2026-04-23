@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
 from datetime import datetime
 from typing import Optional, Tuple
 
@@ -123,23 +124,14 @@ def solve_model(solver, model, *, tee: bool = True):
             n_diff = sum(1 for j in range(numvar) if abs(xx[j] - xx_back[j]) > 1e-8)
             print(f"--- putxx verification: {n_diff} values differ after readback")
 
-            # Compute warm-start objective estimate from the xx vector
-            # Read objective coefficients from MOSEK task
-            numcon = task.getnumcon()
-            obj_sense = task.getobjsense()
-            c = [0.0] * numvar
-            for j in range(numvar):
-                c[j] = task.getcj(j)
-            obj_est = sum(c[j] * xx[j] for j in range(numvar))
-            cfix = task.getcfix()
-            obj_est += cfix
-            print(f"--- Warm-start estimated objective: {obj_est:,.0f} EUR "
-                  f"(cfix={cfix:,.0f}, sense={'max' if obj_sense == mosek.objsense.maximize else 'min'})")
+
         return original_apply()
 
     solver._apply_solver = _patched_apply
     try:
-        return solver.solve(model, tee=tee)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*Setting Var.*outside the bounds.*")
+            return solver.solve(model, tee=tee)
     finally:
         solver._apply_solver = original_apply
 

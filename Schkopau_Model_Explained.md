@@ -306,9 +306,9 @@ This two-mode design lets the model produce results aligned with the KYOS benchm
 
 ### 3.2b  DUO cost mechanism
 
-When both blocks run simultaneously, a different set of fuel and CO₂ parameters applies — captured in the `Block_A_DUO` / `Block_B_DUO` input tabs (Section 2.1b).  This section explains how the model switches between **Mono** (solo) and **DUO** cost parameters using only linear constraints and the new `P_eff_duo` variable.
+When both blocks run simultaneously, a different set of fuel and CO₂ parameters applies — captured in the `Block_A_DUO` / `Block_B_DUO` input tabs (Section 2.1b).  This section explains how the model switches between **Mono** (solo) and **DUO** cost parameters using a pre-linearised cost adjustment and the `both_on` indicator variable.
 
-#### The problem: a bilinear product
+#### The problem: conditional cost selection
 
 The natural way to express the DUO cost would be a conditional:
 
@@ -319,109 +319,48 @@ else:
     run_cost = cost_slope × P_eff + cost_fixed × on           # Mono rate
 ```
 
-This is equivalent to multiplying the continuous variable $P_{\text{eff}}$ by the binary indicator `both_on` — a **bilinear product** that cannot appear directly in a linear programme.
+A linear solver cannot evaluate `if` statements — it only works with additions, multiplications by constants, and linear inequalities.
 
-#### The solution: McCormick linearisation
+#### The solution: pre-linearised DUO cost adjustment
 
-**The core idea in plain English.**  Imagine you are adding two different price tags to a product.  When Block A runs alone, the fuel rate is 82.38 EUR/MWh.  When both blocks run together (the DUO mode), the shared boiler infrastructure makes it slightly cheaper: 80.18 EUR/MWh.
-
-The model needs to charge the right rate in each hour.  In code you would write:
-
-```python
-if both_on:
-    run_cost = 80.18 * P_eff       # DUO rate
-else:
-    run_cost = 82.38 * P_eff       # Mono rate
-```
-
-But a linear solver has no `if` statements — it can only do additions, subtractions, and multiplications by fixed numbers, not by other variables.
-
-The trick is to rewrite the conditional as a single formula:
-
-$$\text{run\_cost} = 82.38 \times P_{\text{eff}} + (-2.20) \times \underbrace{P_{\text{eff}} \times \text{both\_on}}_{= w}$$
-
-- When `both_on = 1`: $w = P_{\text{eff}}$, so the rate becomes $82.38 - 2.20 = 80.18$ EUR/MWh (DUO). ✓
-- When `both_on = 0`: $w = 0$, so the full Mono rate 82.38 EUR/MWh stays. ✓
-
-The only obstacle: $w = P_{\text{eff}} \times \text{both\_on}$ is still a product of two variables — a bilinear term that is nonlinear and breaks the LP solver.  We need to replace $w$ with an auxiliary variable plus a set of linear inequalities that force $w$ to always equal $P_{\text{eff}} \times \text{both\_on}$ at any valid solution.
-
-#### How McCormick fences in the product
-
-McCormick (1976) proved that for $w = x \cdot y$ with $x \in [x_L, x_U]$ and $y \in [y_L, y_U]$, four linear inequalities form the tightest possible bounding box around all valid $(x, y, w)$ triples:
-
-$$w \ge x_L y + x y_L - x_L y_L \qquad \text{(MC1)}$$
-
-$$w \ge x_U y + x y_U - x_U y_U \qquad \text{(MC2)}$$
-
-$$w \le x_U y + x y_L - x_U y_L \qquad \text{(MC3)}$$
-
-$$w \le x y_U + x_L y - x_L y_U \qquad \text{(MC4)}$$
-
-Think of them as four walls of a fence that squeeze $w$ as close to the true product as possible — linearly.
-
-#### Substituting the Schkopau values
-
-Here $x = P_{\text{eff}} \in [0, P_{\max,\text{eff}}]$ and $y = \text{both\_on} \in \{0, 1\}$, so $x_L = 0$, $x_U = P_{\max,\text{eff}} = 433.7$ MW, $y_L = 0$, $y_U = 1$.  Plugging into MC1–MC4:
-
-| Fence wall | Substitution | Simplifies to |
-|------------|-------------|---------------|
-| MC1 | $w \ge 0 \cdot y + x \cdot 0 - 0 = 0$ | $w \ge 0$ — already guaranteed by the variable lower bound; no new constraint needed |
-| MC2 | $w \ge 433.7 \cdot y + x \cdot 1 - 433.7 \cdot 1$ | $P_{\text{eff\_duo}} \ge P_{\text{eff}} - 433.7 \times (1 - \text{both\_on})$ |
-| MC3 | $w \le 433.7 \cdot y + x \cdot 0 - 0$ | $P_{\text{eff\_duo}} \le 433.7 \times \text{both\_on}$ |
-| MC4 | $w \le x \cdot 1 + 0 \cdot y - 0$ | $P_{\text{eff\_duo}} \le P_{\text{eff}}$ |
-
-**Three active constraints** — those are exactly the three constraint rules in the Pyomo model.
-
-#### Checking that the fence forces the right value
-
-Apply all three constraints for each case:
-
-**Case: `both_on = 0`** (Block B is off — only Block A runs alone).  Example: Block A at $P_{\text{eff}} = 327$ MW.
-
-| Constraint | Evaluates to | Says |
-|-----------|-------------|------|
-| MC2: $w \ge 327 - 433.7 \times (1 - 0)$ | $w \ge -106.7$ | lower bound below 0, so effectively $w \ge 0$ |
-| MC3: $w \le 433.7 \times 0$ | $w \le 0$ | upper bound is zero |
-| MC4: $w \le 327$ | $w \le 327$ | weaker than MC3 here |
-| variable lb | $w \ge 0$ | lower bound is zero |
-
-Result: $0 \le w \le 0$, so $P_{\text{eff\_duo}} = 0$.  The DUO adjustment is switched off. ✓
-
-**Case: `both_on = 1`** (both blocks on).  Example: Block A at $P_{\text{eff}} = 327$ MW, Block B also on.
-
-| Constraint | Evaluates to | Says |
-|-----------|-------------|------|
-| MC2: $w \ge 327 - 433.7 \times (1 - 1)$ | $w \ge 327$ | lower bound is 327 MW |
-| MC3: $w \le 433.7 \times 1$ | $w \le 433.7$ | non-binding |
-| MC4: $w \le 327$ | $w \le 327$ | upper bound is 327 MW |
-
-Result: $327 \le w \le 327$, so $P_{\text{eff\_duo}} = 327 = P_{\text{eff}}$.  The DUO adjustment is fully active. ✓
-
-#### Why this works even inside the solver's search process
-
-During branch-and-bound, the LP relaxation at intermediate nodes can temporarily have `both_on = 0.4` (a fractional value — physically impossible, but the LP relaxation allows it).  In that case the three constraints leave $w$ in a range, not pinned to a single value.  This is fine — the McCormick fence is still the **tightest possible linear approximation**, so the LP gives MOSEK the best possible bound at every node.  Once MOSEK fixes `both_on` to 0 or 1 (which it must in the final solution), the fence collapses to a single point as shown above.  **No approximation error reaches the final answer.**
-
-#### Blended cost formula (DUO cost formula)
-
-The running-cost constraint uses Mono parameters as a base and adds the DUO delta proportional to `P_eff_duo`:
-
-$$\text{run\_costs}_{b,t} = \underbrace{\text{cost\_slope}^{\text{mono}} \times P_{\text{eff}} + \text{cost\_fixed}^{\text{mono}} \times \text{on}}_{\text{Mono base}} + \underbrace{\Delta\text{slope} \times P_{\text{eff\_duo}} + \Delta\text{fixed} \times \text{both\_on}}_{\text{DUO adjustment}}$$
-
-where:
+The cost difference between DUO and Mono parameters can be decomposed:
 
 $$\Delta\text{slope}_{b,t} = \text{cost\_slope\_duo}_{b,t} - \text{cost\_slope}_{b,t}$$
 
 $$\Delta\text{fixed}_{b,t} = \text{cost\_fixed\_duo}_{b,t} - \text{cost\_fixed}_{b,t}$$
 
-**Verification — when `both_on = 1`** (so $P_{\text{eff\_duo}} = P_{\text{eff}}$ and `both_on = 1`):
+The full DUO adjustment at hour $t$ for block $b$ is:
 
-$$\text{run\_cost} = (\text{cost\_slope} + \Delta\text{slope}) \times P_{\text{eff}} + (\text{cost\_fixed} + \Delta\text{fixed}) \times \text{on} = \text{cost\_slope\_duo} \times P_{\text{eff}} + \text{cost\_fixed\_duo} \times \text{on}$$
+$$\Delta\text{cost}_{b,t} = \Delta\text{slope}_{b,t} \times P_{\text{eff},b,t} + \Delta\text{fixed}_{b,t}$$
 
-**Verification — when `both_on = 0`** (so $P_{\text{eff\_duo}} = 0$ and `both_on = 0`):
+Since $P_{\text{eff}}$ is a continuous variable, this product makes the expression nonlinear.  The model avoids this by **pre-computing** the adjustment at a fixed operating point $P_{\text{nom}}$:
 
-$$\text{run\_cost} = \text{cost\_slope} \times P_{\text{eff}} + \text{cost\_fixed} \times \text{on}$$
+$$\text{duo\_cost\_adj}_{b,t} = \Delta\text{slope}_{b,t} \times P_{\text{nom}} + \Delta\text{fixed}_{b,t}$$
 
-The formula cleanly selects Mono or DUO parameters depending on the operating mode — all within a single linear constraint.
+where $P_{\text{nom}}$ is a representative power level (midpoint of $[P_{\min}, P_{\max,\text{eff}}]$ by default, or the per-hour Stage 1 solution when available via `pnom_hint`).
+
+The cost constraint becomes:
+
+$$\text{run\_costs}_{b,t} = \underbrace{\text{cost\_slope} \times P_{\text{eff}} + \text{cost\_fixed} \times \text{on}}_{\text{Mono base}} + \underbrace{\text{duo\_cost\_adj}_{b,t} \times \text{both\_on}_t}_{\text{DUO adjustment}}$$
+
+- When `both_on = 1`: the DUO adjustment is added, making costs cheaper (since $\text{duo\_cost\_adj} < 0$ when DUO is more efficient).
+- When `both_on = 0`: the DUO term vanishes, and pure Mono costs apply.
+
+**Crucially, `both_on` (not `on[other_block]`) gates the DUO adjustment.**  This ensures that when block $b$ is OFF (even if the other block is running), no spurious DUO cost is charged.  The `both_on` variable equals 1 only when *both* blocks are simultaneously running (see Section 4.8).
+
+#### Linearisation error and re-linearisation
+
+The pre-linearisation introduces a small approximation error:
+
+$$\varepsilon_{b,t} = \Delta\text{slope}_{b,t} \times (P_{\text{eff},b,t} - P_{\text{nom}})$$
+
+This error is zero when $P_{\text{eff}} = P_{\text{nom}}$ and grows linearly with the deviation.  In practice, with $|\Delta\text{slope}| \approx 2$ EUR/MWh and $|P_{\text{eff}} - P_{\text{nom}}| \lesssim 150$ MW, the hourly error is at most ~300 EUR — negligible against hourly revenues of 20 000–40 000 EUR.  Summed over the full horizon, the total linearisation error is typically **100–200K EUR** (0.3–0.5% of total PnL).
+
+To minimise this error, the model uses **`pnom_hint`**: after Stage 1 solves, each block's per-hour $P_{\text{eff}}$ values are passed to Stage 2 as $P_{\text{nom}}$, giving a tighter linearisation.  An optional iterative re-linearisation loop (`RELINEARIZE_ITERS` in config) can further refine this by re-solving with updated $P_{\text{nom}}$ from the previous Stage 2 solution.
+
+#### Why not use McCormick / P_eff_duo?
+
+An earlier version of the model used McCormick envelope constraints to create an auxiliary variable $P_{\text{eff\_duo}} = P_{\text{eff}} \times \text{both\_on}$, giving an exact representation.  However, this approach introduced 3 extra constraints per block per hour (36,726 additional constraints), significantly slowing the solver.  The pre-linearised approach achieves nearly identical results (~0.3% error) with zero additional variables and a single parameter per block per hour, making solves **2–3× faster**.
 
 #### Worked example — Block A, winter hour, both blocks on
 
@@ -434,13 +373,17 @@ Continuing the Block A example from Section 2.1 (TC_Pmin = 89.29, TC_Pmax = 84.8
 | `cost_slope` [EUR/MWh] | 82.38 | 80.18 | Δslope = −2.20 |
 | `cost_fixed` [EUR/h] | 1 071 | 910 | Δfixed = −161 |
 
-With Block A dispatched at $P_{\text{eff}} = 327$ MW and both blocks on ($P_{\text{eff\_duo}} = 327$ MW):
+With $P_{\text{nom}} = (155 + 443.6) / 2 = 299.3$ MW:
 
-$$\text{run\_cost}_{\text{Mono}} = 82.38 \times 327 + 1\,071 \times 1 = 27\,909 \text{ EUR/h}$$
+$$\text{duo\_cost\_adj} = (-2.20) \times 299.3 + (-161) = -819.5 \text{ EUR/h}$$
 
-$$\text{run\_cost}_{\text{DUO}} = 27\,909 + (-2.20) \times 327 + (-161) \times 1 = 27\,909 - 719 - 161 = 27\,029 \text{ EUR/h}$$
+With Block A dispatched at $P_{\text{eff}} = 327$ MW and both blocks on:
 
-The DUO parameters save approximately **880 EUR/h for Block A alone** in this example.  Summed across ~3 000 dual-block hours over the full horizon, the model recovers over **+2 million EUR** in PnL compared to using Mono parameters for all hours.
+$$\text{run\_cost} = 82.38 \times 327 + 1\,071 \times 1 + (-819.5) \times 1 = 27\,909 - 819.5 = 27\,090 \text{ EUR/h}$$
+
+Compared to exact DUO cost: $80.18 \times 327 + 910 = 27\,129$ EUR/h.  The linearisation error is $27\,090 - 27\,129 = -39$ EUR/h (0.14%), arising because $P_{\text{eff}} = 327 \ne P_{\text{nom}} = 299.3$.
+
+Summed across ~2,500 dual-block hours over the full horizon, the model recovers approximately **5–6 million EUR** in PnL compared to using Mono parameters for all hours (5.2M from lower costs + 0.7M from extra DUO production capacity).
 
 ### 3.3  Objective function
 
@@ -638,11 +581,23 @@ This technique — replacing logical conditions with linear inequalities — is 
 
 ### 4.9  Optional: start-up ramp profile
 
-The model has two ramp modes, controlled by the `USE_SIMPLE_STARTUP_RAMP` flag:
+The startup-ramp fidelity and warm-start staging strategy are controlled by a single `SOLVE_MODE` parameter in `config.py`:
 
-- **Simple mode (`True`)**: No detailed ramp constraints.  The `in_ramp` variable is fixed to 0 for all hours, so the standard Pmin lower bound applies from the first hour of startup.  This mode remains available as a fast fallback.
+| `SOLVE_MODE` | Stages | Description | When to use |
+|---|---|---|---|
+| `"simple"` | 1 | Simple ramp only (Pmin/Pmax bounds, no ramp profiles). | Debugging or quick sanity checks. |
+| `"full"` | 1 | Full multi-hour ramp (accurate but slow). | Isolating whether ramp constraints cause issues. |
+| `"staged_ramp"` | 2 | Stage 1 simple ramp → Stage 2 full ramp with integer hint. | **Recommended default.** |
 
-- **Detailed mode (current, `False`)**: The model limits output during startup hours to follow the configured ramp profiles.  The `in_ramp` variable tracks the startup window, and Big-M constraints relax the Pmin lower bound during ramp hours to allow lower profile levels.  This is the currently used mode.
+Coal constraints are toggled independently via `USE_COAL_CONSTRAINS` — set to `False` for unrestricted (unlimited coal) runs.
+
+Internally, `USE_SIMPLE_STARTUP_RAMP` is derived from `SOLVE_MODE` and toggled by `main.py` during staged solves — it should not be set manually.
+
+The two effective ramp modes are:
+
+- **Simple ramp** (used as an intermediate stage or standalone with `"simple"`): No detailed ramp constraints.  The `in_ramp` variable is fixed to 0 for all hours, so the standard Pmin lower bound applies from the first hour of startup.
+
+- **Full ramp** (used in final stage of `"staged_ramp"`, or standalone with `"full"`): The model limits output during startup hours to follow the configured ramp profiles.  The `in_ramp` variable tracks the startup window, and Big-M constraints relax the Pmin lower bound during ramp hours to allow lower profile levels.
 
 **Important implementation detail — why ramp profiles skip hour 0:**
 
@@ -1063,7 +1018,7 @@ For reference, at these power levels:
 - Block A at 160 MW with DOW: P_eff = 160 + 27 = 187 MW → coal ≈ 180.8 t/h, run_cost ≈ 16 476 EUR/h
 - Block B at 160 MW without DOW: P_eff = 160 MW → coal ≈ 161.2 t/h, run_cost ≈ 14 252 EUR/h
 
-**6. Set detailed ramp variables (when `USE_SIMPLE_STARTUP_RAMP = False`):**
+**6. Set detailed ramp variables (when `SOLVE_MODE` is not `"simple"`):**
 
 The `in_ramp` binary variable marks which hours fall within a startup ramp window (up to `MAX_RAMP_HOURS` hours after a startup).  The code first clears all `in_ramp` to 0, then for each startup hour, sets `in_ramp = 1` for the next few hours:
 
@@ -1720,68 +1675,62 @@ Described in full detail in **Section 5.5**.  Sets `.value` on every variable in
 
 #### Step 4 — Staged solve with integer hint transfer (`main.py`)
 
-When `USE_STAGED_RAMP_WARMSTART = True` and the model uses detailed startup ramps (`USE_SIMPLE_STARTUP_RAMP = False`), the pipeline uses a **two-stage solving strategy**:
+The solve pipeline is controlled by a single `SOLVE_MODE` parameter (see **Section 4.9** for the full table).  The recommended mode is **`"staged_ramp"`** (2-stage: simple ramp → full ramp).  Coal constraints are toggled independently via `USE_COAL_CONSTRAINS`.
 
 **Stage 1 — Solve an easier version of the problem:**
 
 <pre class="annotated">
-<span class="c1"># Temporarily switch to simple ramp mode (no ramp-profile constraints)</span>
+<span class="c1"># SOLVE_MODE="staged_ramp": temporarily use simple ramp (no profile constraints)</span>
 cfg.USE_SIMPLE_STARTUP_RAMP = True
 
 m1 = build_model(df, cost_meta)           <span class="c2"># build Pyomo model WITHOUT ramp constraints</span>
 warm_start_heuristic(m1)                   <span class="c3"># fill in initial schedule (Section 5.5)</span>
-solver1 = create_solver()                  <span class="c4"># create MOSEK solver instance</span>
+
+<span class="c4"># Stage 1 uses wider gap (12%) + shorter time (600s) — it only needs a good hint</span>
+solver1 = create_solver()
 res1 = solve_model(solver1, m1, tee=True)  <span class="c5"># solve with warm-start injection + CONSTRUCT_SOL</span>
 </pre>
 
-The simple-ramp model is **easier** because it has fewer constraints (no ramp profile bounds) and fewer variables (`in_ramp` is fixed to 0).  It typically converges to a 2–3% gap in under 10 minutes.
-
-After Stage 1, the code **writes a full result file** with the suffix `_unrestricted`:
-
-<pre class="annotated">
-df_stage1 = extract_results(df.copy(), m1, cost_meta)     <span class="c1"># extract schedule into DataFrame</span>
-run_audit(df_stage1, m1)                                    <span class="c2"># verify Obj/PnL match</span>
-write_excel(df_stage1, cost_meta, "output_unrestricted.xlsx") <span class="c3"># write intermediate Excel</span>
-</pre>
-
-This intermediate file is useful even if Stage 2 fails — it gives a valid schedule without ramp constraints.
+The simple-ramp model is **easier** because it has fewer constraints (no ramp profile bounds) and fewer variables (`in_ramp` is fixed to 0).  It typically converges to a good solution in 3–4 minutes.
 
 **Stage 2 — Solve the full problem using Stage 1 as a starting point:**
 
 <pre class="annotated">
-cfg.USE_SIMPLE_STARTUP_RAMP = False        <span class="c1"># restore detailed ramp mode</span>
+cfg.USE_SIMPLE_STARTUP_RAMP = False        <span class="c1"># restore full ramp mode for Stage 2</span>
 
-m = build_model(df, cost_meta)             <span class="c2"># build NEW model WITH ramp constraints</span>
-warm_start_heuristic(m)                     <span class="c3"># fill in heuristic schedule (as baseline)</span>
-_copy_integer_hint(m1, m)                   <span class="c4"># OVERWRITE heuristic with Stage 1's solved values</span>
-solver = create_solver()                    <span class="c5"># fresh MOSEK instance</span>
-results = solve_model(solver, m, tee=True)  <span class="c6"># solve full-ramp model with transferred hints</span>
+<span class="c2"># Extract per-hour P_eff from Stage 1 for DUO re-linearisation</span>
+_pnom = {(b, t): P_eff[b,t] for b in blocks for t in hours}
+
+m = build_model(df, cost_meta, pnom_hint=_pnom)  <span class="c3"># build with tighter DUO linearisation</span>
+warm_start_heuristic(m)                           <span class="c4"># fill in heuristic schedule (as baseline)</span>
+_copy_integer_hint(m1, m)                          <span class="c5"># OVERWRITE heuristic with Stage 1's solved values</span>
+_resync_in_ramp(m)                                 <span class="c6"># re-derive in_ramp from injected startup schedule</span>
+_fix_tiers_from_hint(m, m1, window=24)             <span class="c7"># fix on/off at hours far from transitions</span>
+solver = create_solver()
+results = solve_model(solver, m, tee=True)         <span class="c8"># solve full-ramp model with transferred hints</span>
 </pre>
 
-The key step is `_copy_integer_hint(m1, m)`.  This function:
+**Key steps explained:**
 
-1. Loops through every variable in the Stage 1 model (`m1`).
-2. For each variable that exists in both models and is binary/integer, copies the solved value.
-3. Only copies to variables that are not fixed (respects initial conditions).
+- **`pnom_hint`** — Stage 1's per-hour $P_{\text{eff}}$ values are passed to `build_model()` so that the DUO linearisation parameter `duo_cost_adj` is computed at each hour's actual operating point rather than the generic midpoint.  This tightens the linearisation approximation.
 
-<pre class="annotated">
-def _copy_integer_hint(src, dst):
-    for v_src in src.component_objects(Var):       <span class="c1"># loop: on, startup, shutdown, hot_start, ...</span>
-        v_dst = getattr(dst, v_src.name)            <span class="c2"># find matching variable in Stage 2 model</span>
-        for idx in v_src:                           <span class="c3"># e.g. ("A", 1500), ("B", 3200), ...</span>
-            vd_src = v_src[idx]                     <span class="c4"># one specific entry from Stage 1</span>
-            if vd_src.is_binary() or vd_src.is_integer():
-                                                     <span class="c5"># check THIS entry, not the IndexedVar container</span>
-                value = round(vd_src.value)          <span class="c6"># e.g. 1 (ON) — round in case of float imprecision</span>
-                if not v_dst[idx].fixed:             <span class="c7"># don't overwrite initial-condition locks</span>
-                    v_dst[idx].value = value          <span class="c8"># transfer: e.g. on[A,1500] = 1 in Stage 2</span>
-</pre>
+- **`_copy_integer_hint(m1, m)`** — Transfers Stage 1's solved on/off/startup/shutdown values to Stage 2.  Skips variables that are *fixed* in the source (e.g. `in_ramp` fixed to 0 in simple-ramp mode) to avoid overwriting Stage 2's ramp variables.
 
-**Why check `is_binary()`/`is_integer()` on each entry, not on the container?**  In Pyomo, an indexed variable like `on[b,t]` is an `IndexedVar`.  You can't call `.is_binary()` on the container — it doesn't have that method.  You must check each individual entry (`VarData`) instead.  This was a bug fix: the original code tried to check the container's `.domain` attribute and crashed.
+- **`_resync_in_ramp(m)`** — Re-derives all `in_ramp` hints from the transferred startup schedule.  For each `startup[b,t]=1` event, it sets `in_ramp[b, t..t+H-1]` to 1 where $H = \text{MAX\_RAMP\_HOURS}$.
 
-**Why does this help?** Stage 1's optimal on/off schedule is close to Stage 2's optimal schedule — the ramp constraints mainly affect power levels during startup hours, not the overall pattern of when blocks are on or off.  By giving Stage 2 a proven-good starting schedule, MOSEK can focus on optimising around the ramp constraints rather than re-discovering the basic dispatch pattern.
+- **`_fix_tiers_from_hint(m, m1, window=24)`** — Identifies transition points (on→off and off→on) in Stage 1's solution and **fixes** the integer variables (`on`, `startup`, tier indicators) at all hours more than 24h from any transition.  This dramatically reduces the number of free binary variables (typically from 61K → 20K) while keeping flexibility around startups/shutdowns.
 
-**Alternative staged strategy** (`USE_STAGED_COAL_WARMSTART`): Instead of simple→detailed ramp, this uses no-coal→with-coal as the staging criterion.  Stage 1 solves without coal constraints (unlimited coal); Stage 2 adds coal limits with transferred hints.  This is currently **disabled by default** because the ramp-based staging performs better in practice.
+**Optional: iterative re-linearisation** — If `RELINEARIZE_ITERS > 0`, the solve pipeline runs additional passes after Stage 2.  Each pass extracts the current $P_{\text{eff}}$ values, rebuilds the model with updated `pnom_hint`, copies integer hints from the previous solution, and re-solves.  This is rarely needed — the default is `RELINEARIZE_ITERS = 0`.
+
+The key step is `_copy_integer_hint(m1, m)`.  This function loops through every binary/integer variable in Stage 1's solved model and copies its value to the corresponding variable in Stage 2.  It skips variables that are *fixed* in the source (e.g. `in_ramp` fixed to 0 in simple-ramp mode — these are model constants, not MIP decisions) and respects initial-condition locks in the destination.
+
+**Why does this help?** Stage 1's optimal on/off schedule is close to Stage 2's — the ramp constraints mainly affect power levels during startup hours, not the overall dispatch pattern.  By giving Stage 2 a proven-good starting schedule, MOSEK can focus on optimising around the ramp constraints rather than re-discovering the basic pattern.
+
+**`_fix_tiers_from_hint(m, m1, window=24)`** — the most impactful Stage 2 speedup.  It identifies all on→off and off→on transitions in Stage 1's solution, then **fixes** binary variables at hours more than 24h from any transition:
+- `on[b,t]` fixed to its Stage 1 value (0 or 1)
+- `startup[b,t]` and tier indicators fixed to 0
+
+This typically reduces free binary variables from ~61K to ~20K (a 67% reduction), dramatically speeding up branch-and-bound while preserving flexibility around startup/shutdown decisions.
 
 #### Step 5 — Warm-start injection into MOSEK (`solver.py` → `solve_model()`)
 
@@ -1954,24 +1903,23 @@ All parameters are defined in `schkopau_mtp/config.py`.  Changing a parameter on
 
 | Parameter | Default | What it controls |
 |-----------|---------|-----------------|
-| `USE_COAL_CONSTRAINS` | True | Enable/disable monthly coal caps.  Set False for "unlimited coal" scenarios. |
-| `USE_DOW_OPPORTUNITY_COSTS` | True | Include DOW steam in P_eff and DOW revenues/OFF costs (True) vs. treat as pure merchant (False). |
-| `MOSEK_MIO_TOL_REL_GAP` | 0.04 (4%) | Stop when the gap between best solution and theoretical best is ≤ this fraction. Lower = more precise but slower. |
-| `MOSEK_MIO_MAX_TIME` | 600 s | Maximum time for the solver.  The solver stops after this even if the gap is above the tolerance. |
-| `MIO_SEED` | 7 | Random seed for MOSEK's branch-and-bound.  Changing this produces different (but equally valid) search paths. |
+| `USE_COAL_CONSTRAINS` | True | Enable/disable monthly coal caps.  Set False for unlimited coal (unrestricted) runs. |
+| `COAL_TOLERANCE` | 0.005 | Allow coal limit to be exceeded by this fraction (e.g. 0.005 = 0.5%). |
+| `USE_DOW_OPPORTUNITY_COSTS` | False | Include DOW steam in P_eff and DOW revenues/OFF costs (True) vs. treat as pure merchant (False). |
+| `MOSEK_MIO_TOL_REL_GAP` | 0.02 (2%) | Stop when the gap between best solution and theoretical best is ≤ this fraction. Lower = more precise but slower. |
+| `MOSEK_MIO_MAX_TIME` | 2500 s | Maximum time for the solver.  The solver stops after this even if the gap is above the tolerance. |
 | `CONSTRUCT_SOL` | ON | MOSEK constructs an LP solution from the integer hints before branching.  Almost always should be ON. |
 | `MIN_UP` | 8 h | Minimum consecutive hours a block must stay on after starting. |
 | `MIN_DOWN` | 6 h | Minimum consecutive hours a block must stay off after stopping. |
 | `INITIAL_ON` | {"A": 0, "B": 1} | Which blocks are on (1) or off (0) at the start of the planning horizon. |
-| `OWN_CONSUMPTION` | 12 MW | Auxiliary power the plant draws from the grid when offline. |
+| `OWN_CONSUMPTION` | 10 MW | Auxiliary power the plant draws from the grid when offline. |
 | `DOW_OFF_CONSUMPTION` | 130 MW | The DOW consumer's electric backup load when the plant is fully offline. |
 | `DOW_OPPORTUNITY_REVENUE` | 188 EUR/MW | Revenue rate for DOW steam delivery. |
 | `DOW_OFF_COMPENSATION` | 6.9 EUR/MWh | Partial compensation paid to the DOW consumer for their backup heating costs. |
 | `DUAL_BLOCK_BOOST` | 5 MW | Extra capacity each block gets when both run simultaneously. |
-| `START_MARGIN_MIN` | 22 000 EUR | Flat amount added to every start-up cost (safety margin for wear-and-tear uncertainty). |
-| `USE_SIMPLE_STARTUP_RAMP` | False | When True, disables detailed ramp constraints (fast fallback mode).  When False, uses the detailed ramp profiles from the Starts tab. |
-| `USE_STAGED_RAMP_WARMSTART` | True | Enables two-stage solve: Stage 1 simple ramp → Stage 2 full ramp with integer hint transfer.  Only active when `USE_SIMPLE_STARTUP_RAMP = False`. |
-| `USE_STAGED_COAL_WARMSTART` | False | Alternative two-stage: Stage 1 without coal → Stage 2 with coal.  Disabled by default. |
+| `START_MARGIN_MIN` | 0 EUR | Flat amount added to every start-up cost (safety margin for wear-and-tear uncertainty). |
+| `SOLVE_MODE` | `"staged_ramp"` | Controls startup-ramp fidelity and warm-start staging: `"simple"`, `"full"`, or `"staged_ramp"` (recommended).  See **Section 4.9** for details. |
+| `RELINEARIZE_ITERS` | 0 | Number of iterative DUO re-linearisation passes after Stage 2.  0 = no iteration; the Stage 1 `pnom_hint` is usually sufficient. |
 | `OFFLINE_FIXED_PENALTY_NO_DOW` | 3 420 EUR/h | Fixed hourly penalty charged when the plant is offline in DOW-OFF mode (replaces the DOW-related OFF costs). |
 | `DEFAULT_GRIDFEE` | 23.6 EUR/MWh | Grid fee used when the input file does not specify one. |
 
