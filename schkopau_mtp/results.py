@@ -414,10 +414,11 @@ def _print_coal_duo_diagnostic(df, cost_meta=None):
         if limit_kt is not None:
             limit_t = limit_kt * 1000.0 * _tol
             limit_disp = f"{limit_t:,.0f}"
-            if e_val > limit_t and s_val <= limit_t:
+            _abs_tol = 5.0  # tonnes – ignore trivial overages
+            if e_val > limit_t + _abs_tol and s_val <= limit_t + _abs_tol:
                 status = "!! EXACT EXCEEDS LIMIT (solver blind)"
                 any_problem = True
-            elif e_val > limit_t:
+            elif e_val > limit_t + _abs_tol:
                 status = "! BOTH EXCEED LIMIT"
                 any_problem = True
             elif abs(err) > 1.0:
