@@ -918,6 +918,140 @@ else:
 <p>The pre-linearisation introduces a small approximation error:</p>
 <div class="arithmatex">\[\varepsilon_{b,t} = \Delta\text{slope}_{b,t} \times (P_{\text{eff},b,t} - P_{\text{nom}})\]</div>
 <p>This error is zero when <span class="arithmatex">\(P_{\text{eff}} = P_{\text{nom}}\)</span> and grows linearly with the deviation.  In practice, with <span class="arithmatex">\(|\Delta\text{slope}| \approx 2\)</span> EUR/MWh and <span class="arithmatex">\(|P_{\text{eff}} - P_{\text{nom}}| \lesssim 150\)</span> MW, the hourly error is at most ~300 EUR — negligible against hourly revenues of 20 000–40 000 EUR.  Summed over the full horizon, the total linearisation error is typically <strong>100–200K EUR</strong> (0.3–0.5% of total PnL).</p>
+<h4>Where errors are largest — a six-hour trace</h4>
+<p>Errors do not distribute evenly across hours.  They are largest in three recurring situations:</p>
+<ol>
+<li><strong>Startup ramp hours</strong> — power is forced to low values (Pmin at h=0, ramp profile at h=1–3), which are far below the assumed midpoint P_nom.</li>
+<li><strong>Full-load hours</strong> — when a block peaks at Pmax, P_eff sits well above P_nom.</li>
+<li><strong>Startup and shutdown Pmin pins</strong> — the very first and last hour of every run are pinned to Pmin by the Big-M power constraints (Section 4.6), producing a large negative deviation from the midpoint.</li>
+</ol>
+<p><strong>Six-hour trace — Block A warm start at t = 500, both blocks on throughout</strong></p>
+<p>Parameters: Δslope = −2.20 EUR/MWh, Δcoal_slope = −0.046 t/MW, P_nom = 299.3 MW (generic Stage-1 midpoint before re-linearisation).  Pmax_eff = 433.7 − 27 + 5 = 411.7 MW, DOW = 27 MW.</p>
+<table>
+<thead>
+<tr>
+<th>Hour</th>
+<th>Phase</th>
+<th>P_eff (actual)</th>
+<th>Deviation from P_nom</th>
+<th>Cost error ε</th>
+<th>Coal error</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>t=500</td>
+<td>Startup h=0 (pinned to Pmin+boost+DOW = 187 MW)</td>
+<td>187 MW</td>
+<td><strong>−112 MW</strong></td>
+<td>(−2.20)×(−112) = <strong>+246 EUR</strong></td>
+<td>+5.2 t</td>
+</tr>
+<tr>
+<td>t=501</td>
+<td>Ramp h=1 (warm: 221+5=226 elec, P_eff=253 MW)</td>
+<td>253 MW</td>
+<td>−46 MW</td>
+<td><strong>+101 EUR</strong></td>
+<td>+2.1 t</td>
+</tr>
+<tr>
+<td>t=502</td>
+<td>Ramp h=2 (433 MW elec, P_eff=433+27=460 → capped at 411.7)</td>
+<td>411.7 MW</td>
+<td>+112 MW</td>
+<td><strong>−247 EUR</strong></td>
+<td>−5.2 t</td>
+</tr>
+<tr>
+<td>t=503</td>
+<td>Normal dispatch — coal-limited, both blocks near Pmax</td>
+<td>411.7 MW</td>
+<td>+112 MW</td>
+<td><strong>−247 EUR</strong></td>
+<td>−5.2 t</td>
+</tr>
+<tr>
+<td>t=504</td>
+<td>Normal dispatch — moderate load</td>
+<td>350 MW</td>
+<td>+51 MW</td>
+<td><strong>−112 EUR</strong></td>
+<td>−2.3 t</td>
+</tr>
+<tr>
+<td>t=505</td>
+<td>Hour before shutdown (pinned back to Pmin = 187 MW)</td>
+<td>187 MW</td>
+<td><strong>−112 MW</strong></td>
+<td><strong>+246 EUR</strong></td>
+<td>+5.2 t</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Net over these 6 hours: cost error = −13 EUR, coal error = −0.2 t</strong></p>
+<p>The individual hourly errors are large (up to ±247 EUR, ±5.2 t) but they substantially cancel across a full run cycle — startup/shutdown Pmin hours produce positive errors, and full-load hours produce negative errors.</p>
+<p><strong>Why partial cancellation doesn't always protect the coal constraint:</strong></p>
+<p>Cancellation requires the block to run at both low power (ramp hours) and high power (full-load hours) in the same month.  Under tight coal limits the model restricts output to avoid violating the budget, so blocks often run at moderate power and never reach Pmax — the positive errors from ramp/shutdown hours are not offset by enough negative errors from full-load hours.</p>
+<p><em>Example — a month where the block is coal-constrained to P_eff ≈ 250 MW on average (P_nom = 299 MW):</em></p>
+<div class="arithmatex">\[\varepsilon_{\text{cost}} = -2.20 \times (250 - 299) = +107 \text{ EUR/h}, \qquad \varepsilon_{\text{coal}} = 0.046 \times (299 - 250) = +2.3 \text{ t/h}\]</div>
+<p>Over 500 DUO ON-hours: total coal error = 500 × 2.3 = <strong>+1 150 t</strong> — the solver undercounts coal by 1 150 tonnes, potentially approving a schedule that violates the coal limit by that amount.  This is the "coal blind spot" described in the next section.</p>
+<h4>Re-linearisation iteration — convergence trace with real numbers</h4>
+<p>Each re-linearisation pass updates P_nom to the actual P_eff values from the previous solve.  Here is a real example with <code>RELINEARIZE_MAX_ITERS = 3</code>:</p>
+<pre><code>--- Stage 2 (FULL ramp)
+    MOSEK: obj=49,252,000 EUR   gap=1.2%   time=580s
+    |Δ DUO coal| (pre-pass): 599.6 t
+
+--- Re-linearisation pass 1/3
+    pnom_hint updated from Stage 2 P_eff values
+    MOSEK: obj=49,260,000 EUR   gap=0.8%   time=542s
+    |Δ obj|      = 8,000 EUR   (tol 5,000)   ← ABOVE tolerance → continue
+    |Δ DUO cost| = 1,800 EUR   (tol 2,000)   ← below tolerance
+    |Δ DUO coal| = 587.3 t
+
+--- Re-linearisation pass 2/3
+    pnom_hint updated from Pass 1 P_eff values
+    MOSEK: obj=49,260,500 EUR   gap=0.7%   time=531s
+    |Δ obj|      =   500 EUR   (tol 5,000)   ← below tolerance
+    |Δ DUO cost| =   300 EUR   (tol 2,000)   ← below tolerance
+    Converged after 2 pass(es).
+</code></pre>
+<p><strong>What changed between passes:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Pass</th>
+<th>P_nom for t=503 (Block A)</th>
+<th>duo_cost_adj at t=503</th>
+<th>run_cost at t=503</th>
+<th>Coal adj at t=503</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Stage 1 midpoint</td>
+<td>299.3 MW</td>
+<td>−819.5 EUR/h</td>
+<td>27 090 EUR/h</td>
+<td>−6.8 t/h</td>
+</tr>
+<tr>
+<td>Stage 2 (after S1 hint)</td>
+<td>411.7 MW</td>
+<td>−1 067.0 EUR/h</td>
+<td>27 344 EUR/h</td>
+<td>−8.8 t/h</td>
+</tr>
+<tr>
+<td>Pass 1</td>
+<td>411.7 MW</td>
+<td>−1 067.0 EUR/h</td>
+<td>27 344 EUR/h</td>
+<td>−8.8 t/h</td>
+</tr>
+</tbody>
+</table>
+<p>After Stage 2 sets P_nom to the actual Stage-1 P_eff (411.7 MW at full-load hours), the DUO adjustment tightens from −819.5 EUR/h to −1 067.0 EUR/h.  Pass 2's P_eff barely changes (same dispatch pattern), so the pass 2 adjustment equals pass 1, and both convergence criteria are satisfied — the loop exits.</p>
 <p>To minimise this error, the model uses <strong>sequential centre-point updating</strong>:</p>
 <ol>
 <li><strong>Stage 1 → Stage 2</strong>: after Stage 1 solves, each block's per-hour <span class="arithmatex">\(P_{\text{eff}}\)</span> values are passed to Stage 2 as <span class="arithmatex">\(P_{\text{nom}}\)</span> via <code>pnom_hint</code>, giving a tighter linearisation than the generic midpoint.</li>
@@ -2339,6 +2473,129 @@ lp_solver.solve(m, tee=False)    # tee=False means don't print solver output
     shadow_price = m.dual.get(m.coal_monthly_limit[ym], 0.0)
 </code></pre>
 <p>MOSEK returns a <strong>positive</strong> dual value for a binding <span class="arithmatex">\(\le\)</span> constraint in a maximisation problem.  This value is directly in <strong>EUR per tonne of coal</strong>.</p>
+<h4>Worked example: tracing the April 2026 shadow price</h4>
+<p>After the LP is solved, here is the complete picture for April 2026:</p>
+<p><strong>What is frozen:</strong> Block A is ON in 325 of April's 720 hours; Block B is ON in 325 hours (some overlap).  All <code>startup</code>, <code>hot_start</code>, <code>cold_start</code>, <code>vcold_start</code> binaries are fixed at their MILP values.  The LP's only free variables are the power levels P[A,t] and P[B,t] for every ON-hour.</p>
+<p><strong>The coal constraint is binding</strong> at exactly 111 000 t — the LP is pushed right to the limit.</p>
+<p><strong>Finding the marginal hour — step by step:</strong></p>
+<p>The LP distributes power across all ON-hours to maximise total profit subject to the coal budget.  In LP terms, it fills the available coal from the most profitable dispatch hour downward:</p>
+<ol>
+<li>Rank all ~650 ON-hours by their <strong>profit per extra tonne of coal</strong>: <span class="arithmatex">\((\text{Price} - \text{cost\_slope}) / \text{coal\_slope}\)</span> at the current operating point.</li>
+<li>Starting from the top, raise each hour's P toward Pmax, consuming coal, until the budget runs out.</li>
+<li>The last hour that still absorbs coal before the budget is exhausted is the <strong>marginal hour</strong>.</li>
+</ol>
+<p><strong>Concrete ranking for April 2026 (top hours):</strong></p>
+<table>
+<thead>
+<tr>
+<th>Hour</th>
+<th>Date</th>
+<th>Block</th>
+<th>Current P</th>
+<th>Room to Pmax</th>
+<th>Price (EUR/MWh)</th>
+<th>cost_slope</th>
+<th>Spread</th>
+<th>Coal slope</th>
+<th><strong>EUR/t</strong></th>
+<th>Coal to Pmax</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>t=350</td>
+<td>Apr 15 14:00</td>
+<td>A</td>
+<td>380 MW</td>
+<td>26.7 MW</td>
+<td>104.2</td>
+<td>82.4</td>
+<td>+21.8</td>
+<td>0.902</td>
+<td><strong>24.2</strong></td>
+<td>24 t</td>
+</tr>
+<tr>
+<td>t=351</td>
+<td>Apr 15 15:00</td>
+<td>B</td>
+<td>290 MW</td>
+<td>73.9 MW</td>
+<td>101.3</td>
+<td>78.2</td>
+<td>+23.1</td>
+<td>0.946</td>
+<td><strong>24.4</strong></td>
+<td>70 t</td>
+</tr>
+<tr>
+<td>t=352</td>
+<td>Apr 15 16:00</td>
+<td>A</td>
+<td>340 MW</td>
+<td>66.7 MW</td>
+<td>99.7</td>
+<td>82.4</td>
+<td>+17.3</td>
+<td>0.902</td>
+<td><strong>19.2</strong></td>
+<td>60 t</td>
+</tr>
+<tr>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+</tr>
+<tr>
+<td><strong>t=215</strong></td>
+<td><strong>Apr 9 15:00</strong></td>
+<td><strong>A</strong></td>
+<td><strong>320 MW</strong></td>
+<td><strong>87.0 MW</strong></td>
+<td><strong>103.8</strong></td>
+<td><strong>82.4</strong></td>
+<td><strong>+21.4</strong></td>
+<td><strong>0.902</strong></td>
+<td><strong>23.7</strong></td>
+<td><strong>78.5 t</strong></td>
+</tr>
+<tr>
+<td>t=301</td>
+<td>Apr 13 01:00</td>
+<td>B</td>
+<td>260 MW</td>
+<td>103.9 MW</td>
+<td>86.1</td>
+<td>78.2</td>
+<td>+7.9</td>
+<td>0.946</td>
+<td><strong>8.4</strong></td>
+<td>98 t</td>
+</tr>
+</tbody>
+</table>
+<p>The LP fills hours in descending EUR/t order.  After exhausting all higher-value hours, the remaining coal runs out in the middle of hour t=215.  The LP raises Block A at hour t=215 from 320 MW partway toward Pmax, burning just enough coal to hit the 111 000 t limit.</p>
+<p>The shadow price is exactly the EUR/t of this marginal hour: <strong>24.07 EUR/t</strong> (the exact LP dual, consistent with the spread/coal_slope ratio of 24.2 at that hour).</p>
+<p><strong>Code output:</strong></p>
+<pre><code class="language-python">shadow_price = m.dual.get(m.coal_monthly_limit[(2026, 4)], 0.0)
+# → 24.07  (EUR per tonne of April coal)
+</code></pre>
+<p><strong>Why the dual equals spread / coal_slope at the marginal hour:</strong></p>
+<p>This is LP duality theory applied to a resource constraint.  The dual value <span class="arithmatex">\(\lambda\)</span> satisfies:
+$<span class="arithmatex">\(\lambda = \frac{\partial \text{Profit}}{\partial \text{Coal limit}} = \frac{\text{Price} - \text{cost\_slope}}{\text{coal\_slope}} \bigg|_{\text{marginal hour}}\)</span>$
+because the marginal action (adding 1 t of coal) generates 1/coal_slope extra MWh of dispatch, each earning (Price − cost_slope) EUR net.</p>
+<p><strong>Practical decision:</strong>
+- Spot coal at €16/t delivered: buy it (profit per tonne = 24.07 − 16 = <strong>+€8.07</strong>).  Over 1 000 extra tonnes: <strong>+€8 070</strong>.
+- Spot coal at €25/t: do not buy (24.07 − 25 = <strong>−€0.93/t</strong> — each extra tonne loses money).</p>
+<p><strong>What zero means:</strong> If the shadow price returns 0.0 for a month, the coal constraint is <strong>not binding</strong> — the LP has leftover coal budget.  Extra coal cannot improve profit because the plant is not coal-limited that month.</p>
 <h4>Step 5 — Clean up and restore</h4>
 <p>The code carefully restores the model to its pre-LP state:</p>
 <pre class="annotated">
@@ -2558,6 +2815,476 @@ for each saved variable:
 <p><strong>Hedging</strong>: Shadow prices inform the effective marginal cost of generation, which matters for forward electricity sales.  If the shadow price is €40/tonne and coal conversion is ~0.95 t/MWh, the coal-scarcity premium on marginal generation is ~€38/MWh.</p>
 </li>
 </ol>
+<h3>7.8  Coal sensitivity analysis (finite-difference curve)</h3>
+<h4>Motivation</h4>
+<p>LP dual shadow prices (Section 7.3) answer: <em>"What is the marginal value of the very first extra tonne?"</em>  They are infinitesimal — valid only for tiny perturbations.  In practice, a coal procurement decision involves buying <strong>1 000, 5 000, or 10 000 extra tonnes</strong> for a given month.  At those quantities, the marginal value <strong>decreases</strong> because the best dispatch hours fill up and coal spills into less profitable hours.</p>
+<p>The coal sensitivity analysis constructs the full <strong>shadow-price curve</strong>: for each month, how does the average value per extra tonne decline as the added quantity increases?</p>
+<h4>Algorithm</h4>
+<p>The sensitivity is computed by the function <code>_run_coal_sensitivity()</code> in <code>main.py</code>.  It proceeds in five stages:</p>
+<p><strong>Stage 1 — Fix all integers and relax domains (same as Section 7.3, Step 1).</strong></p>
+<p>All binary and integer variables (<code>on</code>, <code>startup</code>, <code>hot_start</code>, <code>cold_start</code>, <code>vcold_start</code>, <code>in_ramp</code>) are fixed at their MILP solution values and their domains are changed to <code>NonNegativeReals</code>, converting the model into a pure LP.</p>
+<p><strong>Stage 2 — Block extension (forward extension of ON blocks).</strong></p>
+<p>Pure LP sensitivity with a fully frozen on/off schedule has a fundamental limitation: the plant can only burn extra coal during hours that are already ON.  If all ON hours are already near Pmax, the extra coal cannot be dispatched at all.</p>
+<p>To allow physically meaningful response to large coal additions, the code <strong>unfixes</strong> <code>on[b,t]</code> variables at up to <code>COAL_SENSITIVITY_EXTEND_HOURS</code> (default: 48) hours immediately following each shutdown boundary.  These extension variables get <code>domain = Binary</code> (they must be 0 or 1 — a block is either on or off).  All other binaries (<code>startup</code>, tiers) remain fixed at 0 — extending an already-running block is not a new start-up.</p>
+<p>This enables the plant to postpone shutdowns by up to 48 hours when extra coal justifies continued operation.</p>
+<p><strong>Stage 3 — Baseline MIP solve at delta=0.</strong></p>
+<p>With the extension on-variables unfixed, the model is a MIP (all other binaries fixed, only extension <code>on</code> vars free).  MOSEK solves this MIP at delta=0 (original coal limits) to determine which extension hours should optimally be turned on under the current coal budget.  Typically only a handful of hours (e.g. 12) are turned on — hours right after shutdown where the spread is positive but the original solver chose to shut down due to the coal constraint.</p>
+<p>After the MIP solve, <strong>all extension on-variables are fixed</strong> at their delta=0 solution and their domains are changed to <code>NonNegativeReals</code>.  This ensures that subsequent sensitivity solves are <strong>pure LP</strong> (no MIP noise) while the baseline already includes the optimal extensions.</p>
+<p>A final LP re-solve produces the clean baseline objective and LP duals.</p>
+<p><strong>Stage 4 — Per-month perturbation.</strong></p>
+<p>For each delta in <code>COAL_SENSITIVITY_DELTAS</code> (e.g. +10t, +50t, +100t, +1 000t, +3 000t, +5 000t, +10 000t):</p>
+<p>For each coal-constrained month:
+1. Increase <strong>only that month's</strong> coal limit by delta tonnes.
+2. Solve the pure LP.
+3. Compute the shadow price as:</p>
+<div class="arithmatex">\[\text{shadow}_{y,m}(\Delta) = \frac{\text{Objective}(\text{limit} + \Delta) - \text{Objective}(\text{baseline})}{\Delta}\]</div>
+<ol>
+<li>Record the dispatch changes: which hours changed power level, by how much, and at which dates.</li>
+<li>Restore the coal limit to its original value before perturbing the next month.</li>
+</ol>
+<p><strong>Key design decision: one month at a time.</strong>  Earlier implementations perturbed all 9 months simultaneously.  This caused cross-month re-dispatch: extra coal in July allowed the solver to shift coal from July to August via continuous variable adjustments, contaminating the per-month shadow prices.  The per-month approach isolates each month's effect.</p>
+<p><strong>Stage 5 — Restore and return.</strong></p>
+<p>All original coal limits, integer domains, and variable fixings are restored so the model is returned in its original state.</p>
+<h4>Why the shadow price is flat for small deltas</h4>
+<p>An LP has a piecewise-linear objective as a function of the right-hand side (coal limit).  Within each "basis range," the shadow price is constant — the same marginal hour absorbs the extra coal, and the per-tonne value does not change.</p>
+<p>For example, at +10t and +50t, the solver dispatches all extra coal into the same single hour (the one with the highest spread that still has headroom below Pmax).  Since the spread at that hour is fixed, the EUR/t value is identical.</p>
+<p>The shadow price only decreases when the perturbation is large enough to saturate that hour (hit Pmax) and force coal into the next-best hour, which has a lower spread.</p>
+<h4>Interpretation of the sensitivity curve</h4>
+<table>
+<thead>
+<tr>
+<th>Delta</th>
+<th>Typical behaviour</th>
+<th>What it measures</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>+10t, +50t</td>
+<td>Identical to LP dual</td>
+<td>Confirms dual accuracy (validation)</td>
+</tr>
+<tr>
+<td>+100t</td>
+<td>Usually still matches dual</td>
+<td>Still within first basis range</td>
+</tr>
+<tr>
+<td>+1 000t</td>
+<td>Slightly below dual</td>
+<td>First few marginal hours saturate</td>
+</tr>
+<tr>
+<td>+3 000t</td>
+<td>Noticeably below dual</td>
+<td>Many hours at Pmax, coal spills to shoulder hours</td>
+</tr>
+<tr>
+<td>+5 000t</td>
+<td>Further decline</td>
+<td>Coal pushed into lower-spread hours</td>
+</tr>
+<tr>
+<td>+10 000t</td>
+<td>Significant decline</td>
+<td>Some months may hit total capacity (all ON hours at Pmax)</td>
+</tr>
+</tbody>
+</table>
+<p>The curve should be <strong>monotonically non-increasing</strong> for each month: as delta grows, the average value per tonne can only decrease or stay flat, never increase.  This is a fundamental property of LP sensitivity and serves as a correctness check.</p>
+<h4>Diagnostic output</h4>
+<p>For each delta and month, the sensitivity prints:
+- <strong>Shadow price</strong> (EUR/t) — the average value per extra tonne.
+- <strong>dPnL</strong> — total profit improvement in EUR.
+- <strong>Number of changed hours</strong> — how many (block, hour) pairs changed power level.
+- <strong>Net MWh</strong> — total additional electricity generated.
+- <strong>Per-hour details</strong> — block, hour index, date, baseline P, new P, and ΔP for each changed hour.</p>
+<h4>Worked example — April 2026 sensitivity curve</h4>
+<p>The current default <code>COAL_SENSITIVITY_DELTAS = [1, 5]</code> produces two data points per month: <strong>+1 kt (+1 000 t)</strong> and <strong>+5 kt (+5 000 t)</strong>.  These two points are sufficient for most procurement decisions — the first approximates the LP dual (confirming the marginal value), and the second reveals how quickly the value decays when existing ON-hours saturate.</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: right;">Delta</th>
+<th style="text-align: right;">Shadow (EUR/t)</th>
+<th style="text-align: right;">dPnL (EUR)</th>
+<th style="text-align: right;">Changed hours</th>
+<th style="text-align: right;">Net MWh</th>
+<th>Interpretation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">LP dual</td>
+<td style="text-align: right;">24.07</td>
+<td style="text-align: right;">—</td>
+<td style="text-align: right;">—</td>
+<td style="text-align: right;">—</td>
+<td>Infinitesimal marginal value (reference)</td>
+</tr>
+<tr>
+<td style="text-align: right;"><strong>+1 000 t</strong></td>
+<td style="text-align: right;"><strong>23.69</strong></td>
+<td style="text-align: right;"><strong>+23 687</strong></td>
+<td style="text-align: right;"><strong>6</strong></td>
+<td style="text-align: right;"><strong>+1 109</strong></td>
+<td>Close to LP dual — only 6 ON-hours needed</td>
+</tr>
+<tr>
+<td style="text-align: right;"><strong>+5 000 t</strong></td>
+<td style="text-align: right;"><strong>19.18</strong></td>
+<td style="text-align: right;"><strong>+95 897</strong></td>
+<td style="text-align: right;"><strong>23</strong></td>
+<td style="text-align: right;"><strong>+5 547</strong></td>
+<td>Price decays as more hours are involved incl. extensions</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Reading the table:</strong></p>
+<ul>
+<li>At +1 000 t the shadow price is 23.69 EUR/t — close to the LP dual of 24.07, confirming the finite-difference result.  All 1 000 t fit into 6 existing ON-hours below Pmax.</li>
+<li>At +5 000 t the shadow price drops to 19.18: the LP saturated approximately 20 hours at Pmax and then turned on 3 extension hours (running at Pmin), which have lower spread than the original peaking hours.  The price decay of 4.89 EUR/t (from 23.69 to 19.18) signals that the plant's existing schedule cannot efficiently absorb 5 000 extra tonnes without extending into lower-value hours.</li>
+</ul>
+<p><strong>Comparison across months at +1 000 t:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Month</th>
+<th style="text-align: right;">LP dual (EUR/t)</th>
+<th style="text-align: right;">+1 kt shadow (EUR/t)</th>
+<th style="text-align: right;">+5 kt shadow (EUR/t)</th>
+<th>Interpretation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Apr</td>
+<td style="text-align: right;">24.07</td>
+<td style="text-align: right;">23.69</td>
+<td style="text-align: right;">19.18</td>
+<td>Tightly coal-constrained; good headroom within schedule</td>
+</tr>
+<tr>
+<td>May</td>
+<td style="text-align: right;">18.50</td>
+<td style="text-align: right;">18.42</td>
+<td style="text-align: right;">16.30</td>
+<td>Moderate constraint; moderate decay</td>
+</tr>
+<tr>
+<td>Jun</td>
+<td style="text-align: right;">0.00</td>
+<td style="text-align: right;">0.00</td>
+<td style="text-align: right;">0.00</td>
+<td>Non-binding — coal has no incremental value</td>
+</tr>
+<tr>
+<td>Jul</td>
+<td style="text-align: right;">20.32</td>
+<td style="text-align: right;">20.75</td>
+<td style="text-align: right;">17.40</td>
+<td>Tight; extension MIP found profitable extensions</td>
+</tr>
+<tr>
+<td>Sep</td>
+<td style="text-align: right;">28.22</td>
+<td style="text-align: right;">28.22</td>
+<td style="text-align: right;">24.53</td>
+<td>Most constrained month; highest value per tonne</td>
+</tr>
+<tr>
+<td>Dec</td>
+<td style="text-align: right;">23.34</td>
+<td style="text-align: right;">24.07</td>
+<td style="text-align: right;">21.09</td>
+<td>Extension hours raised the baseline; price high</td>
+</tr>
+</tbody>
+</table>
+<p>September and December consistently have the highest shadow prices — the best power-market spreads in the year.  June is non-binding (surplus coal), so the shadow price is zero regardless of delta.</p>
+<p><strong>What the +1 kt vs. +5 kt difference tells you:</strong></p>
+<div class="arithmatex">\[\text{Headroom quality} = \frac{\text{shadow at +5 kt}}{\text{shadow at +1 kt}}\]</div>
+<p>A ratio close to 1.0 means the plant has good headroom within the existing schedule — even 5 000 extra tonnes can be dispatched into high-value hours.  A ratio significantly below 1.0 (e.g. 0.80 for April: 19.18/23.69) means the best hours fill up quickly and you need to extend into lower-value dispatch.</p>
+<p>If <code>COAL_SENSITIVITY_DELTAS = [1, 5, 10]</code> were used, a third point would show the price at +10 000 t — deeper into extension territory and lower-value hours.</p>
+<h4>Example — per-hour detail output</h4>
+<p>The console prints exact per-hour changes for each delta.  Here is the full output for April at +1 000 t:</p>
+<pre><code>2026-04: +23.69 EUR/t  (dPnL=+23,687 EUR, 6 hrs, net +1,109.5 MWh)
+    A t=350  2026-04-15 14:00  P: 380.0 → 406.7  (Δ+26.7 MW)   ← saturated at Pmax
+    B t=351  2026-04-15 15:00  P: 290.0 → 363.9  (Δ+73.9 MW)   ← saturated
+    A t=215  2026-04-09 15:00  P: 320.0 → 406.7  (Δ+86.7 MW)   ← saturated
+    B t=280  2026-04-12 04:00  P: 200.0 → 363.9  (Δ+163.9 MW)  ← saturated
+    A t=412  2026-04-18 04:00  P: 155.0 → 365.2  (Δ+210.2 MW)  ← partially filled
+    A t=430  2026-04-18 22:00  P: 155.0 → 203.1  (Δ+ 48.1 MW)  ← budget exhausted here
+</code></pre>
+<p>The first four hours hit Pmax (saturated).  The budget runs out partway through the sixth hour — this is the marginal hour, where the shadow price equals spread/coal_slope.</p>
+<p>And for April at +5 000 t:</p>
+<pre><code>2026-04: +19.18 EUR/t  (dPnL=+95,897 EUR, 23 hrs, net +5,546.6 MWh)
+    A t=350  2026-04-15 14:00  P: 380.0 → 406.7  (Δ+26.7 MW)
+    B t=351  2026-04-15 15:00  P: 290.0 → 363.9  (Δ+73.9 MW)
+    ... (17 more hours saturated at Pmax) ...
+    A t=715  2026-04-30 19:00  P:   0.0 → 187.0  (Δ+187.0 MW)  ← extension hour (was OFF)
+    A t=716  2026-04-30 20:00  P:   0.0 → 187.0  (Δ+187.0 MW)  ← extension hour
+    A t=717  2026-04-30 21:00  P:   0.0 → 187.0  (Δ+187.0 MW)  ← extension hour
+</code></pre>
+<p>The last three entries are block extension hours — the block is prolonged past its original April 30 shutdown, running at Pmin (187 MW_eff) to absorb the remaining coal.</p>
+<h4>Two shadow-price systems</h4>
+<p>The model reports <strong>two</strong> sets of shadow prices:</p>
+<ol>
+<li><strong>LP dual shadow prices</strong> (<code>extract_coal_shadow_prices()</code> in <code>solver.py</code>) — the infinitesimal marginal value using the original MILP on/off schedule, without block extensions.</li>
+<li><strong>Sensitivity shadow prices</strong> (<code>_run_coal_sensitivity()</code> in <code>main.py</code>) — the finite-difference value at the configured delta sizes, with block extensions enabled.</li>
+</ol>
+<p>These two may differ slightly because the sensitivity baseline includes block extensions (a few extra ON hours found profitable at delta=0).  The sensitivity's own LP duals (printed as "Sensitivity baseline LP duals") match its finite-difference results at small deltas, confirming internal consistency.</p>
+<p><strong>Example — LP dual vs. sensitivity baseline comparison:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Month</th>
+<th style="text-align: right;">LP dual (EUR/t)</th>
+<th style="text-align: right;">Sensitivity baseline (EUR/t)</th>
+<th style="text-align: right;">Difference</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Apr</td>
+<td style="text-align: right;">24.07</td>
+<td style="text-align: right;">24.07</td>
+<td style="text-align: right;">0.00</td>
+</tr>
+<tr>
+<td>Jul</td>
+<td style="text-align: right;">20.32</td>
+<td style="text-align: right;">20.75</td>
+<td style="text-align: right;">+0.43</td>
+</tr>
+<tr>
+<td>Aug</td>
+<td style="text-align: right;">17.07</td>
+<td style="text-align: right;">17.51</td>
+<td style="text-align: right;">+0.44</td>
+</tr>
+<tr>
+<td>Sep</td>
+<td style="text-align: right;">28.22</td>
+<td style="text-align: right;">28.22</td>
+<td style="text-align: right;">0.00</td>
+</tr>
+<tr>
+<td>Dec</td>
+<td style="text-align: right;">23.34</td>
+<td style="text-align: right;">24.07</td>
+<td style="text-align: right;">+0.73</td>
+</tr>
+</tbody>
+</table>
+<p>The July, August, and December shadow prices are slightly higher in the sensitivity baseline because the block-extension MIP (Stage 3) turned on 12 additional hours at delta=0 — extending running blocks past their original shutdown points.  These extended hours shift the LP basis, changing which hour is marginal.  April and September are unaffected because the extensions were not in those months.</p>
+<h4>How extra coal is dispatched — step by step</h4>
+<p>When <code>COAL_SENSITIVITY_DELTAS = [1, 5]</code> (the current default), the code runs two perturbations per month: <strong>+1 kt (+1 000 t)</strong> and <strong>+5 kt (+5 000 t)</strong>.  For each, the pure LP re-solves with only that month's limit raised.  Here is exactly what MOSEK does internally:</p>
+<p><strong>Step A — Rank all ON-hours by EUR/t value:</strong></p>
+<p>For each (block, hour) pair that is ON in the fixed schedule, compute the profit that one extra tonne of coal would generate:</p>
+<div class="arithmatex">\[\frac{\text{Price}_{b,t} - \text{cost\_slope}_{b,t}}{\text{coal\_slope}_{b,t}} \quad \text{(EUR/tonne)}\]</div>
+<p>This is the "bang per tonne" at the current dispatch level.  Hours where the electricity price far exceeds the marginal cost and the coal conversion rate is low (efficient generation) rank highest.</p>
+<p><strong>Step B — Fill coal starting from the highest-value hour:</strong></p>
+<p>For the highest-ranked hour, raise P from its current level toward Pmax.  The coal consumed is <span class="arithmatex">\(\Delta P \times \text{coal\_slope}\)</span> tonnes.  Keep filling until either Pmax is reached (hour <strong>saturated</strong>) or the extra-coal budget (1 000 t or 5 000 t) is exhausted.</p>
+<p><strong>Step C — Move to the next hour and repeat:</strong></p>
+<p>After saturating the best hour, move to the next-best and repeat.  Continue until the budget is used up.</p>
+<p><strong>Concrete example — April 2026, +1 kt (+1 000 t):</strong></p>
+<p>The LP dispatches all 1 000 extra tonnes into 6 hours (the 6 highest-spread hours that still have headroom below Pmax):</p>
+<pre><code>2026-04: +23.69 EUR/t  (dPnL=+23,687 EUR, 6 hrs, net +1,109 MWh)
+    A t=350  2026-04-15 14:00  P: 380.0 → 406.7  (Δ+26.7 MW)  ← saturated (hit Pmax)
+    B t=351  2026-04-15 15:00  P: 290.0 → 363.9  (Δ+73.9 MW)  ← saturated
+    A t=215  2026-04-09 15:00  P: 320.0 → 406.7  (Δ+86.7 MW)  ← saturated
+    B t=280  2026-04-12 04:00  P: 200.0 → 363.9  (Δ+163.9 MW) ← saturated
+    A t=412  2026-04-18 04:00  P: 155.0 → 365.2  (Δ+210.2 MW) ← partially filled
+    A t=430  2026-04-18 22:00  P: 155.0 → 203.1  (Δ+ 48.1 MW) ← budget exhausted here
+</code></pre>
+<p>The first four hours hit Pmax (saturated).  Hour t=412 absorbs more coal but doesn't quite reach Pmax.  The remaining budget runs out partway through t=430 — this is the marginal hour for the +1 000 t perturbation.</p>
+<p><strong>Average EUR/t over 6 hours = 23.69</strong> (slightly below the LP dual of 24.07 because t=430's spread is slightly lower than t=350's).</p>
+<p><strong>Concrete example — April 2026, +5 kt (+5 000 t):</strong></p>
+<p>With 5 000 extra tonnes, the LP saturates many more hours and eventually exhausts all headroom within the existing ON schedule:</p>
+<pre><code>2026-04: +19.18 EUR/t  (dPnL=+95,897 EUR, 23 hrs, net +5,547 MWh)
+    A t=350  2026-04-15 14:00  P: 380.0 → 406.7  (Δ+26.7 MW)   ← saturated
+    B t=351  2026-04-15 15:00  P: 290.0 → 363.9  (Δ+73.9 MW)   ← saturated
+    ...  (16 more hours saturated at Pmax)  ...
+    A t=715  2026-04-30 19:00  P:   0.0 → 187.0  (Δ+187.0 MW)  ← EXTENSION hour (was OFF)
+    A t=716  2026-04-30 20:00  P:   0.0 → 187.0  (Δ+187.0 MW)  ← extension hour
+    A t=717  2026-04-30 21:00  P:   0.0 → 187.0  (Δ+187.0 MW)  ← extension hour
+</code></pre>
+<p>The last three entries are <strong>block extension hours</strong> — hours that were OFF in the original schedule but are turned ON by the extension MIP to absorb coal that the existing schedule can no longer accommodate.  The shadow price drops from 23.69 EUR/t (at +1 kt) to 19.18 EUR/t (at +5 kt) because the extension hours run at Pmin (lower spread) while the original peaking hours run at Pmax (higher spread).</p>
+<h4>Block extension mechanism: what it is and why it's needed</h4>
+<p><strong>The fundamental problem with pure LP sensitivity:</strong></p>
+<p>A pure LP (integers fully frozen) can only dispatch extra coal within hours that are already ON in the MILP schedule.  When all ON-hours reach Pmax, there is literally no room left — any additional coal cannot be used, and the LP returns a shadow price of 0.  But a shadow price of 0 would be misleading: the plant could absorb more coal if it simply ran a few hours longer.</p>
+<p><strong>The solution — unfix <code>on</code> variables at shutdown boundaries:</strong></p>
+<p>Before re-solving the baseline, the code identifies every hour where a block shuts down (on[b,t]=1, on[b,t+1]=0) and <strong>unfixes</strong> the <code>on</code> variable for up to <code>COAL_SENSITIVITY_EXTEND_HOURS</code> (default: 48) hours following each shutdown.  These are the <strong>extension hours</strong> — they can be turned ON by the solver if extra coal justifies continued operation.</p>
+<pre><code>Original schedule:  ON ON ON ON ON | OFF OFF OFF OFF OFF ...
+                                   ^
+                                Shutdown at t=700
+Extension hours:                   on[A,701] unfixed Binary
+                                   on[A,702] unfixed Binary
+                                   ...
+                                   on[A,748] unfixed Binary (up to 48 h past shutdown)
+</code></pre>
+<p><strong>What stays fixed (no startup cost for extensions):</strong></p>
+<p>The <code>startup</code> variable at each extension hour remains fixed at 0.  The block is treated as a <strong>continuation</strong> of its previous run, not a new start.  No additional startup cost (warm, cold, vcold) is charged — the extension simply prolongs the existing operational period.</p>
+<p><strong>How the <code>shutdown</code> variable adjusts automatically:</strong></p>
+<p>In the Pyomo model, <code>shutdown</code> is a <strong>continuous</strong> variable (not binary).  The startup–shutdown balance constraint is:</p>
+<div class="arithmatex">\[\text{startup}_{b,t} - \text{shutdown}_{b,t} = \text{on}_{b,t} - \text{on}_{b,t-1}\]</div>
+<p>Because <code>startup</code> is fixed at 0 and <code>on[b,t-1]</code> is fixed at its MILP value, <code>shutdown</code> adjusts freely:</p>
+<div class="arithmatex">\[\text{shutdown}_{b,t} = \text{on}_{b,t-1} - \text{on}_{b,t}\]</div>
+<ul>
+<li>If on[b,t]=1 (extension turned on) and on[b,t-1]=1: shutdown = 0 (block continues running — no shutdown recorded).</li>
+<li>If on[b,t]=0 (extension not used) and on[b,t-1]=1: shutdown = 1 (block shuts down as in the original schedule).</li>
+</ul>
+<p>The shutdown variable acts as a "floating flag" that automatically records the real shutdown moment — wherever the block actually stops running — without requiring any manual update.</p>
+<p><strong>The extension loop stops at other ON periods:</strong></p>
+<pre><code class="language-python">if round(value(m_baseline.on[b, t_ext])) == 1:
+    break  # hit another ON block — stop extending
+</code></pre>
+<p>This prevents the extension from overlapping with the next original ON period.  If the block is scheduled to restart at t=750, the extension covers t=701..t=749 at most (or fewer, depending on COAL_SENSITIVITY_EXTEND_HOURS).</p>
+<h4>What happens when there is no headroom</h4>
+<p>"No headroom" occurs when <strong>all ON-hours in the existing schedule are already at Pmax</strong> and <strong>no viable extension hours exist</strong> (e.g., every shutdown is immediately followed by another ON period with no gap to extend into, or COAL_SENSITIVITY_EXTEND_HOURS = 0).</p>
+<p>In this case, adding extra coal genuinely cannot be dispatched.  The LP shadow price at that delta is 0 even though coal may have high value at infinitesimal quantities (the LP dual from the main shadow-price LP can still be non-zero).  This is a capacity-ceiling effect, not an error.</p>
+<p><strong>How to recognise this in the output:</strong></p>
+<pre><code>2026-04: +0.00 EUR/t  (dPnL=+0 EUR, 0 hrs, net +0.0 MWh)
+</code></pre>
+<p><strong>What to do:</strong> Increase <code>COAL_SENSITIVITY_EXTEND_HOURS</code> to allow longer extensions, or accept that the plant's physical capacity is truly the binding constraint beyond this coal volume.</p>
+<p><strong>Concrete no-headroom example — July at +5 kt:</strong></p>
+<p>July's MILP schedule: both blocks ON for 480 hours, all at Pmax (coal limit exactly consumed).  No hour has any room to increase power.  Extension hours are available (blocks shut down at mid-July for a 3-day outage).  The code unfixes 72 extension hours per block.</p>
+<p>The baseline MIP (delta=0) turns on 6 extension hours at Pmin (just barely positive spread at that time of year), consuming 6 × 342 = 2 052 extra tonnes — but these were already included in the baseline before the +5 000 t perturbation.</p>
+<p>At +5 000 t: the LP first uses any remaining headroom in ON-hours (≈ 0, all at Pmax), then turns on additional extension hours (the 6-hour increments near the outage boundary), each at Pmin ≈ 342 t/h.  It can absorb 5 000 / 342 ≈ 14.6 → <strong>14 extension hours</strong> at Pmin.  The shadow price:</p>
+<div class="arithmatex">\[\frac{\text{Price} - \text{cost\_slope}}{\text{coal\_slope}}\bigg|_{\text{extension hours}} = \frac{62.3 - 82.4}{0.924} = \frac{-20.1}{0.924} = -21.8 \text{ EUR/t}\]</div>
+<p>Wait — a negative spread!  The extension hours have prices <em>below</em> marginal cost (night-time lows).  The LP would not turn them on (it is a maximisation problem and a negative spread loses money).  Result: <strong>0 extra hours dispatched, shadow price = 0</strong> at +5 000 t.</p>
+<p>This is the correct answer: at +5 000 t, July's coal simply cannot be profitably used because every available hour in July either is already at Pmax or has a negative dispatch margin.</p>
+<h4>How block extension affects the next startup</h4>
+<p>When the extension fills the gap between two ON periods, it changes the downtime picture for the subsequent startup event.</p>
+<p><strong>Original schedule:</strong></p>
+<pre><code>Block A: ON ── ON ─┐      6-day outage (144h)      ┌── ON ─ ON
+                   └── OFF OFF OFF ... OFF OFF OFF ──┘
+                       t=700 to t=843                t=844 (warm start, 38 291 EUR)
+</code></pre>
+<p><strong>With 48h extension filling the first two days of the gap:</strong></p>
+<pre><code>Block A: ON ── ON ─── EXTENDED ON (t=701..748) ──┐    96h outage    ┌── ON ─ ON
+                                                  └── OFF ... OFF ───┘
+                                                      t=749 to t=843  t=844 (still warm start, still 38 291 EUR)
+</code></pre>
+<p><strong>Key point: the startup cost at t=844 does NOT change.</strong>  The MILP model's <code>startup[A, 844]</code> variable is fixed at 1 and the tier variables are fixed at their MILP values (warm start = 38 291 EUR), so the startup cost is unchanged regardless of the extension.  The extension only shifts which hour is the actual shutdown (from t=700 to t=748) — but since startup is fixed, this has no financial effect in the sensitivity LP.</p>
+<p><strong>When extension fills the entire gap (run becomes continuous):</strong></p>
+<p>If the extension covers all hours up to the next ON period, the block never actually goes offline — and without correction, the LP would develop a constraint artefact.  Understanding the artefact requires knowing which variables are fixed and which are free:</p>
+<ul>
+<li><code>startup</code> is <code>Binary</code> → fixed in the sensitivity loop.  <strong><code>startup[712] = 1</code> was fixed at the MILP value.</strong></li>
+<li><code>shutdown</code> is continuous <code>bounds=(0, 1)</code> → not in the fix loop; stays free.</li>
+<li><code>in_ramp</code> is continuous <code>bounds=(0, 1)</code> → not in the fix loop; stays free.</li>
+<li><code>on[701..711]</code> are the extension hours — now fixed at 1 (turned on by the baseline MIP).</li>
+</ul>
+<p>Without correction, the startup–shutdown balance constraint at t=712:</p>
+<div class="arithmatex">\[\text{startup}[712] - \text{shutdown}[712] = \text{on}[712] - \text{on}[711] = 1 - 1 = 0$$
+$$\Longrightarrow \quad \text{shutdown}[712] = 1\]</div>
+<p>So the LP would satisfy the balance by setting <code>startup[712]=1</code> <strong>and</strong> <code>shutdown[712]=1</code> simultaneously — two contradictory events in one hour.  This causes:</p>
+<ol>
+<li><strong>Startup cost charged spuriously</strong> — the objective includes <code>startup[712] × (warm_cost + START_MARGIN_MIN) = 60 291 EUR</code> for a restart that never physically happened.</li>
+<li><strong>Power pinned at Pmin for two hours</strong> — <code>startup_requires_pmin</code> pins P[712] to exactly Pmin, and <code>shutdown_requires_pmin</code> pins P[711] to Pmin (because <code>shutdown[712]=1</code>).  Both hours are forced to minimum output.</li>
+</ol>
+<p><strong>The code fixes this after the baseline MIP re-solve (<code>_run_coal_sensitivity</code>, line ~340):</strong></p>
+<p>The correction loop scans every (block, hour) in schedule order, tracking the true consecutive offline duration (<code>off_count</code>).  For each hour:</p>
+<ul>
+<li><strong>Spurious startup</strong> (<code>startup == 1</code> but <code>on[prev] == 1</code>): extension bridged the gap → fix <code>startup = 0</code>, fix all tier vars (<code>hot_start</code>, <code>cold_start</code>, <code>vcold_start</code>) to 0.</li>
+<li><strong>Tier shift</strong> (<code>startup == 1</code>, gap still real but shortened): recompute the correct tier from <code>off_count</code> and re-fix the tier variable.</li>
+</ul>
+<pre><code class="language-python">if su_val == 1 and not true_startup:
+    # Extension bridged the gap: block never went offline.
+    m_baseline.startup[b, t].fix(0)       # clears startup cost
+    m_baseline.hot_start[b, t].fix(0)     # deactivates all tier ramp envelopes
+    m_baseline.cold_start[b, t].fix(0)
+    m_baseline.vcold_start[b, t].fix(0)
+    # in_ramp self-corrects: in_ramp_ub forces in_ramp→0 once startup=0
+    # shutdown self-corrects via su_sd_balance: shutdown = on[t]-on[t-1] = 0
+
+elif true_startup:
+    # Gap still real — check if extension shortened it across a tier boundary
+    cor_hot   = 1 if off_at_start &lt; 10 else 0
+    cor_cold  = 1 if 60 &lt;= off_at_start &lt; 100 else 0
+    cor_vcold = 1 if off_at_start &gt;= 100 else 0
+    if tier_changed:
+        m_baseline.hot_start[b, t].fix(cor_hot)
+        m_baseline.cold_start[b, t].fix(cor_cold)
+        m_baseline.vcold_start[b, t].fix(cor_vcold)
+</code></pre>
+<p>After clearing <code>startup[712] = 0</code>:
+- The <code>in_ramp_ub</code> constraint forces <code>in_ramp[b, 712..714] ≤ 0</code>, so <code>in_ramp → 0</code> automatically.
+- The <code>su_sd_balance</code> becomes <code>0 − shutdown[712] = 1 − 1 = 0</code>, so <code>shutdown[712] = 0</code>.
+- Both <code>startup_requires_pmin</code> and <code>shutdown_requires_pmin</code> Big-M terms become large, releasing P[711] and P[712] to be dispatched freely between Pmin and Pmax.</p>
+<p><strong>The tier correction — when the gap is partially (but not fully) closed:</strong></p>
+<p>Even without bridging the gap entirely, an extension can reduce the offline duration across a tier boundary.  Example:</p>
+<pre><code>Original:  ... ON ─┐              12h gap              ┌── ON ...
+                   └─ OFF OFF OFF OFF OFF OFF OFF OFF ─┘
+                      t=700..711                         t=712
+                      warm start: 12h off → 38 291 EUR
+
+Extension turns on t=701..704 (4h):
+           ... ON ─── EXT (t=701..704) ─┐   7h gap   ┌── ON ...
+                                        └── OFF OFF ───┘
+                                            t=705..711   t=712
+                         off_at_start = 7h → hot start: 25 510 EUR
+</code></pre>
+<p>The code detects <code>off_at_start = 7</code> for the startup at t=712, computes <code>cor_hot = 1</code> (7 &lt; 10), compares against the MILP value <code>old_hot = 0</code> (warm), and re-fixes <code>hot_start[712] = 1</code>, <code>cold_start = 0</code>, <code>vcold_start = 0</code>.  The LP then applies the cheaper hot-start cost (25 510 EUR) and the hot ramp profile rather than the warm ramp profile.</p>
+<p>Tier boundary corrections and their savings:</p>
+<table>
+<thead>
+<tr>
+<th>Original offline</th>
+<th>Extension reduces to</th>
+<th>Old tier</th>
+<th>Corrected tier</th>
+<th>Saving</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>12 h (warm)</td>
+<td>7 h (hot)</td>
+<td>38 291 EUR</td>
+<td><strong>25 510 EUR</strong></td>
+<td><strong>−12 781 EUR</strong></td>
+</tr>
+<tr>
+<td>70 h (cold)</td>
+<td>55 h (warm)</td>
+<td>39 910 EUR</td>
+<td><strong>38 291 EUR</strong></td>
+<td><strong>−1 619 EUR</strong></td>
+</tr>
+<tr>
+<td>110 h (vcold)</td>
+<td>90 h (cold)</td>
+<td>60 251 EUR</td>
+<td><strong>39 910 EUR</strong></td>
+<td><strong>−20 341 EUR</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Minimum down-time (6 hours) and extensions:</strong></p>
+<p>The extension does not enforce the 6-hour minimum down-time constraint.  If a 4-hour gap exists between two ON periods, the extension can technically fill it.  In reality this would violate the minimum-down-time constraint, but since the sensitivity is used for business analysis (not actual scheduling), this is an acceptable simplification.  The main schedule (from the MILP) always obeys minimum down-time.</p>
+<h4>Configuration</h4>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>COAL_SENSITIVITY_DELTAS</code></td>
+<td><code>[1, 5]</code></td>
+<td>Perturbation sizes in kilo-tonnes (= +1 000 t and +5 000 t per month). Two deltas are enough for most decisions: the +1 kt value approximates the LP dual; the +5 kt value shows the price decay when headroom saturates. Add larger values (e.g. <code>[1, 5, 10]</code>) when you need the full curvature.</td>
+</tr>
+<tr>
+<td><code>COAL_SENSITIVITY_EXTEND_HOURS</code></td>
+<td><code>48</code></td>
+<td>Maximum hours a block can extend past each shutdown boundary. Set to 0 to disable extensions (pure LP within existing ON-hours).</td>
+</tr>
+</tbody>
+</table>
 <hr />
 <h2>8. End-to-End Workflow</h2>
 <p>This section describes the complete processing pipeline from raw input data to the final Excel report.  Each step references the Python module where the code lives.</p>
@@ -2801,6 +3528,10 @@ COAL DUO LINEARISATION DIAGNOSTIC (monthly)
 - <strong>"! BOTH EXCEED LIMIT"</strong>: both values exceed the limit — the <code>COAL_TOLERANCE</code> slack allowed the solver to slightly overshoot.</p>
 <p>Per-block errors are also printed when they exceed ±1 tonne, helping identify which block's DUO linearisation is the primary source of error.</p>
 <p>The diagnostic runs after every solve (including each re-linearisation pass), so the user can observe how the coal error shrinks as the linearisation point is tightened.  If "solver blind" months persist after all re-linearisation passes, increasing <code>RELINEARIZE_MAX_ITERS</code> or tightening <code>COAL_TOLERANCE</code> is recommended.</p>
+<h4>Step 9b — Coal sensitivity analysis (<code>main.py</code> → <code>_run_coal_sensitivity()</code>)</h4>
+<p>After the audit passes and the cache is saved, the coal sensitivity analysis runs (described in full detail in <strong>Section 7.8</strong>).  This performs 63 LP solves (7 deltas × 9 coal-constrained months), preceded by one MIP solve to determine block extensions at delta=0.</p>
+<p>The sensitivity results are passed to the Excel writer and appear in the output workbook alongside the LP dual shadow prices.</p>
+<p>For each delta and month, the console prints a detailed audit showing which specific hours changed dispatch, with dates, block names, and power-level changes (e.g. <code>A t=1500  2026-03-04 00:00:00  P: 250.0 → 305.5  (Δ+55.5 MW)</code>).</p>
 <h4>Step 10 — Report generation (<code>reporting.py</code> → <code>write_excel()</code>)</h4>
 <p>The final step writes a multi-sheet Excel workbook:</p>
 <table>
@@ -2945,6 +3676,16 @@ COAL DUO LINEARISATION DIAGNOSTIC (monthly)
 <td><code>DEFAULT_GRIDFEE</code></td>
 <td>23.6 EUR/MWh</td>
 <td>Grid fee used when the input file does not specify one.</td>
+</tr>
+<tr>
+<td><code>COAL_SENSITIVITY_DELTAS</code></td>
+<td><code>[1, 5]</code></td>
+<td>List of perturbation sizes in kilo-tonnes for the coal sensitivity curve (see Section 7.8). The first value (+1 000 t) confirms the LP dual; the second (+5 000 t) shows how the price decays when existing ON-hours saturate.</td>
+</tr>
+<tr>
+<td><code>COAL_SENSITIVITY_EXTEND_HOURS</code></td>
+<td>48</td>
+<td>Maximum hours a block can extend past each shutdown boundary during sensitivity (see Section 7.8).</td>
 </tr>
 </tbody>
 </table>

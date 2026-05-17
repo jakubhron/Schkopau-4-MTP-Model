@@ -32,6 +32,7 @@ def write_excel(
     *,
     coal_shadow_prices: dict | None = None,
     merchant_shadow_prices: dict | None = None,
+    coal_sensitivity: dict | None = None,
 ) -> None:
     """
     Create the output Excel workbook with a *Results* and *Monthly* sheet.
@@ -45,6 +46,8 @@ def write_excel(
         {(year, month): EUR/t} shadow prices from the coal constraint LP re-solve.
     merchant_shadow_prices : dict, optional
         {(year, month): EUR/t} merchant-only shadow prices (DOW revenue excluded).
+    coal_sensitivity : dict, optional
+        {delta_kt: {(year, month): EUR/t}} MIP sensitivity per delta.
     """
     Pmax_eff = max(cost_meta.get(f"Pmax_eff_{b}", 0.0) for b in cfg.BLOCKS)
 
@@ -69,6 +72,16 @@ def write_excel(
             "Start_cost_EUR_h", "Variable_other_cost_EUR_h",
             "TC_stack_delta_EUR_h",
             "House_power_EUR_h",
+            # coal linear model coefficients — useful for manual verification
+            *[f"coal_slope_{b}" for b in cfg.BLOCKS],
+            *[f"coal_fixed_{b}" for b in cfg.BLOCKS],
+            *[f"coal_slope_duo_{b}" for b in cfg.BLOCKS],
+            *[f"coal_fixed_duo_{b}" for b in cfg.BLOCKS],
+            # run cost linear model coefficients
+            *[f"cost_slope_{b}" for b in cfg.BLOCKS],
+            *[f"cost_fixed_{b}" for b in cfg.BLOCKS],
+            *[f"cost_slope_duo_{b}" for b in cfg.BLOCKS],
+            *[f"cost_fixed_duo_{b}" for b in cfg.BLOCKS],
         ]
         present = [c for c in audit_cols if c in df_m.columns]
         df_out = pd.concat([df, df_m[present].copy()], axis=1)
@@ -90,10 +103,7 @@ def write_excel(
         # Drop internal computation columns not needed in output
         _internal_cols = [
             f"{prefix}_{b}"
-            for prefix in ("cost_slope", "cost_fixed", "TC_PminN", "TC_Pmax",
-                           "coal_slope", "coal_fixed",
-                           "cost_slope_duo", "cost_fixed_duo",
-                           "coal_slope_duo", "coal_fixed_duo",
+            for prefix in ("TC_PminN", "TC_Pmax",
                            "TC_PminN_duo", "TC_Pmax_duo",
                            "duo_cost_adj", "duo_coal_adj")
             for b in cfg.BLOCKS
@@ -106,7 +116,8 @@ def write_excel(
         # --- Sheet 2: Monthly summary (plant total) ---
         _write_monthly_sheet(writer, df_m, output_path, sheet_name="Monthly",
                              coal_shadow_prices=coal_shadow_prices,
-                             merchant_shadow_prices=merchant_shadow_prices)
+                             merchant_shadow_prices=merchant_shadow_prices,
+                             coal_sensitivity=coal_sensitivity)
 
         # --- Per-block Monthly sheets ---
         for blk in cfg.BLOCKS:
@@ -118,6 +129,7 @@ def write_excel(
                 sheet_name=f"Monthly_{blk}", block=blk,
                 coal_shadow_prices=coal_shadow_prices,
                 merchant_shadow_prices=merchant_shadow_prices,
+                coal_sensitivity=coal_sensitivity,
             )
 
     print(f"\n✓ {cfg.VERSION} saved as:")
@@ -322,6 +334,11 @@ def _prepare_monthly_columns(
     _co2_cost_acc = pd.Series(0.0, index=df_m.index)
     _var_other_acc = pd.Series(0.0, index=df_m.index)
     _rc_acc = pd.Series(0.0, index=df_m.index)
+    # Per-block solver-consistent cost accumulators (additive across blocks)
+    _coal_api2_solver_acc = pd.Series(0.0, index=df_m.index)
+    _coal_other_solver_acc = pd.Series(0.0, index=df_m.index)
+    _co2_cost_solver_acc = pd.Series(0.0, index=df_m.index)
+    _var_other_solver_acc = pd.Series(0.0, index=df_m.index)
     _last_api2_price = 0.0
     _last_transport_price = 0.0
 
@@ -344,7 +361,7 @@ def _prepare_monthly_columns(
 
         _cs = pd.to_numeric(df_m.get(f"cost_slope_{_b}", 0.0), errors="coerce").fillna(0.0)
         _cf = pd.to_numeric(df_m.get(f"cost_fixed_{_b}", 0.0), errors="coerce").fillna(0.0)
-        _rc_acc += _cs * _peff_b + _cf * _on_b
+        _rc_b = _cs * _peff_b + _cf * _on_b
 
         # DUO cost adjustment: Δslope × P_eff_duo + Δfixed × both_on
         _cs_duo = pd.to_numeric(df_m.get(f"cost_slope_duo_{_b}", None), errors="coerce")
@@ -354,7 +371,17 @@ def _prepare_monthly_columns(
             for _bb in cfg.BLOCKS:
                 _both = _both * pd.to_numeric(df_m.get(f"on_model_{_bb}", 0), errors="coerce").fillna(0.0)
             _peff_duo_b = _peff_b * _both
-            _rc_acc += (_cs_duo - _cs) * _peff_duo_b + (_cf_duo - _cf) * _both
+            _rc_b += (_cs_duo - _cs) * _peff_duo_b + (_cf_duo - _cf) * _both
+        _rc_acc += _rc_b
+
+        # Per-block solver-consistent split: apply block's own cost ratio to block's run cost.
+        # Summing these across blocks makes the plant Monthly additive with Monthly_A + Monthly_B.
+        _stack_b = bc["coal_api2"] + bc["coal_other"] + bc["co2_cost"] + bc["var_other"]
+        _stack_b_safe = _stack_b.replace(0.0, np.nan)
+        _coal_api2_solver_acc += (bc["coal_api2"] / _stack_b_safe).fillna(0.0) * _rc_b
+        _coal_other_solver_acc += (bc["coal_other"] / _stack_b_safe).fillna(0.0) * _rc_b
+        _co2_cost_solver_acc += (bc["co2_cost"] / _stack_b_safe).fillna(0.0) * _rc_b
+        _var_other_solver_acc += (bc["var_other"] / _stack_b_safe).fillna(0.0) * _rc_b
 
     # Use single-block factor columns for per-block view (reporting display)
     if block:
@@ -398,23 +425,14 @@ def _prepare_monthly_columns(
     )
 
     # --- Implied cost split from solver running costs ---
-    stack_implied = _coal_api2_acc + _coal_other_acc + _co2_cost_acc + _var_other_acc
-    _run_tc = _rc_acc
+    # Each block's run cost is split using that block's own bottom-up cost ratios,
+    # then accumulated. This ensures Monthly = Monthly_A + Monthly_B exactly.
+    df_m["Coal_API2_cost_solver_EUR_h"] = _coal_api2_solver_acc
+    df_m["Coal_other_cost_solver_EUR_h"] = _coal_other_solver_acc
+    df_m["CO2_cost_solver_EUR_h"] = _co2_cost_solver_acc
+    df_m["Variable_other_cost_solver_EUR_h"] = _var_other_solver_acc
 
-    def _share(component):
-        return np.where(stack_implied > 0.0, component / stack_implied, 0.0)
-
-    sh_coal_api2 = _share(_coal_api2_acc)
-    sh_coal_other = _share(_coal_other_acc)
-    sh_co2 = _share(_co2_cost_acc)
-    sh_other = _share(_var_other_acc)
-
-    df_m["Coal_API2_cost_solver_EUR_h"] = sh_coal_api2 * _run_tc
-    df_m["Coal_other_cost_solver_EUR_h"] = sh_coal_other * _run_tc
-    df_m["CO2_cost_solver_EUR_h"] = sh_co2 * _run_tc
-    df_m["Variable_other_cost_solver_EUR_h"] = sh_other * _run_tc
-
-    df_m["TC_stack_delta_EUR_h"] = _run_tc - (
+    df_m["TC_stack_delta_EUR_h"] = _rc_acc - (
         df_m["Coal_API2_cost_solver_EUR_h"]
         + df_m["Coal_other_cost_solver_EUR_h"]
         + df_m["CO2_cost_solver_EUR_h"]
@@ -507,6 +525,7 @@ def _write_monthly_sheet(
     block: str | None = None,
     coal_shadow_prices: dict | None = None,
     merchant_shadow_prices: dict | None = None,
+    coal_sensitivity: dict | None = None,
 ) -> None:
     """Build the Monthly aggregation table and style it."""
     bsf = f"_{block}" if block else "_A"
@@ -637,6 +656,16 @@ def _write_monthly_sheet(
             dtype=float,
         )
 
+    # ---- Coal sensitivity (MIP re-solves at +delta) ----
+    if coal_sensitivity:
+        for delta_kt, pnl_per_t in sorted(coal_sensitivity.items()):
+            delta_t = delta_kt * 1000
+            label = f"+{delta_t:.0f}t"
+            mv[f"Coal shadow {label}"] = pd.Series(
+                {(y, mo): v for (y, mo), v in pnl_per_t.items()},
+                dtype=float,
+            )
+
     # ---- Price averages ----
     mv["EPEX forecast BL"] = mmean("Price")
     mv["CLS"] = mmean("Price").sub(mmean(f"TC_Pmax{bsf}"), fill_value=0.0)
@@ -682,7 +711,7 @@ def _write_monthly_sheet(
 
 def _define_output_rows() -> List[Tuple[str, str | None, str | None]]:
     """Return the list of (label, unit, key) rows for the Monthly sheet."""
-    return [
+    rows = [
         # --- PRICE INDICATORS ---
         ("Price Indicators", None, None),
         ("EPEX forecast BL", "EUR/MWh", "EPEX forecast BL"),
@@ -725,6 +754,14 @@ def _define_output_rows() -> List[Tuple[str, str | None, str | None]]:
         ("Coal Shadow Price", "EUR/t", "Coal shadow price"),
         ("Coal Shadow Price (Merchant)", "EUR/t", "Coal shadow price (Merchant)"),
     ]
+
+    # Dynamic sensitivity rows from config
+    for delta_kt in (cfg.COAL_SENSITIVITY_DELTAS or []):
+        delta_t = delta_kt * 1000
+        label = f"+{delta_t:.0f}t"
+        rows.append((f"Coal Shadow Price {label}", "EUR/t", f"Coal shadow {label}"))
+
+    return rows
 
 
 # ====================================================================

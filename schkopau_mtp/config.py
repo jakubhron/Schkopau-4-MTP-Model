@@ -22,7 +22,7 @@ VERSION = "Schkopau_base_01"
 #                   FILE PATHS
 # ============================================================
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-INPUT_FOLDER = "Inputs_EOD_20_04_2026"
+INPUT_FOLDER = "Inputs_EOD_11_05_2026"
 
 
 def _find_input_file(folder: str) -> str:
@@ -54,7 +54,9 @@ _input_stem = os.path.splitext(os.path.basename(INPUT_FILE))[0]
 #                   COAL CONSTRAINTS
 # ============================================================
 USE_COAL_CONSTRAINS = True  # enforce monthly coal volume limits from input tab
-COAL_TOLERANCE = 0.005        # allow coal limit to be exceeded by this fraction (e.g. 0.02 = 2%)
+COAL_TOLERANCE = 0.01        # allow coal limit to be exceeded by this fraction (e.g. 0.02 = 2%)
+COAL_SENSITIVITY_DELTAS = [1,5]  # kt deltas for sensitivity solves (+1kt, +3kt, +5kt, +10kt)
+COAL_SENSITIVITY_EXTEND_HOURS = 48  # allow prolonging ON blocks by up to N hours past each shutdown
 
 _restricted_tag = "restricted_" if USE_COAL_CONSTRAINS else ""
 OUTPUT_FILE = os.path.join(os.path.dirname(INPUT_FILE), f"{_input_stem}_results_{_restricted_tag}{_now}.xlsx")
@@ -62,14 +64,14 @@ OUTPUT_FILE = os.path.join(os.path.dirname(INPUT_FILE), f"{_input_stem}_results_
 # ============================================================
 #                   DATE RANGE
 # ============================================================
-START_DATE = pd.Timestamp("2026-04-21 00:00")
-END_DATE = pd.Timestamp("2026-12-31 23:00")
+START_DATE = pd.Timestamp("2026-05-12 00:00")
+END_DATE = pd.Timestamp("2026-06-30 23:00")
 
 # ============================================================
 #                   SOLVER CACHE
 # ============================================================
 USE_CACHED_SOLUTION = False
-CACHE_TAG = "chrono_AP1_cache_v3_2026-03-17_09-52" if USE_CACHED_SOLUTION else f"chrono_AP1_cache_v3_{_now}"
+CACHE_TAG = "chrono_AP1_cache_v3_2026-04-25_21-01" if USE_CACHED_SOLUTION else f"chrono_AP1_cache_v3_{_now}"
 CACHE_DIR = r"./_solver_cache"
 SKIP_SOLVE_AND_EXTRACT = False
 
@@ -77,8 +79,8 @@ SKIP_SOLVE_AND_EXTRACT = False
 #                   SOLVER SETTINGS
 # ============================================================
 USE_MOSEK = True
-MOSEK_MIO_TOL_REL_GAP = "0.04"    # 3 % MIP gap
-MOSEK_MIO_MAX_TIME = "600"         # max 10 minutes
+MOSEK_MIO_TOL_REL_GAP = "0.035"    # 3.5 % MIP gap
+MOSEK_MIO_MAX_TIME = "1000"          # max ~17 minutes
 
 # ============================================================
 #                   PLANT CONSTRAINTS
@@ -89,9 +91,9 @@ DUAL_BLOCK_BOOST = 5.0    # Pmin/Pmax increase when both blocks online [MW]
 
 BIG_M = 500              # tight Big-M (≥ Pmax + boost ≈ 445 MW)
 MIN_UP = 8              # min-up time [h]
-MIN_DOWN = 6            # min-down time [h]
+MIN_DOWN = 8            # min-down time [h]
 START_MARGIN_MIN = 0     # minimum margin hurdle / start [EUR]
-INITIAL_ON = {"A": 0, "B": 1}  # initial unit commitment state per block
+INITIAL_ON = {"A": 1, "B": 0}  # initial unit commitment state per block
 MAX_RAMP_HOURS = 3       # maximum startup ramp duration [h]
 
 # ============================================================

@@ -3,9 +3,9 @@ import pandas as pd, numpy as np, shutil, tempfile, os, sys
 OWN_CONSUMPTION = 12.0
 OFFLINE_FIXED_PENALTY_NO_DOW = 3420
 
-folder = r'C:\Users\jakub.hron\OneDrive - EP Commodities, a.s\Documents\Schkopau_mtp\Inputs_EOD_20_04_2026'
+folder = r'C:\Users\jakub.hron\OneDrive - EP Commodities, a.s\Documents\Schkopau_mtp\Inputs_EOD_27_04_2026'
 kyos_file = folder + r'\KYOS.xlsx'
-our_file  = folder + r'\Data1 EPNLintr26 High availability_20_04_2026_results_restricted_2026-04-23_14-15.xlsx'
+our_file  = folder + r'\Data1 EPNLintr26 High availability_27_04_2026_results_restricted_2026-04-28_10-57.xlsx'
 
 # --- Read KYOS ---
 tmp_fd_k, tmp_k = tempfile.mkstemp(suffix='.xlsx'); os.close(tmp_fd_k)
@@ -32,8 +32,8 @@ res['Date'] = pd.to_datetime(res['Date']) + pd.to_timedelta(res['Hour'], unit='h
 merged = kyos.merge(res, on='Date', how='left')
 
 # April 2026 (from 20th onward)
-apr_k = merged[(merged['Date'] >= '2026-04-20') & (merged['Date'].dt.month==4) & (merged['Date'].dt.year==2026)].copy()
-apr_o = res[(res['Date'] >= '2026-04-20') & (res['Date'].dt.month==4) & (res['Date'].dt.year==2026)].copy()
+apr_k = merged[(merged['Date'] >= '2026-04-20') & (merged['Date'].dt.month==5) & (merged['Date'].dt.year==2026)].copy()
+apr_o = res[(res['Date'] >= '2026-04-20') & (res['Date'].dt.month==5) & (res['Date'].dt.year==2026)].copy()
 
 # ---------- Build cost curves from columns available in Results sheet ----------
 # linear cost model:  cost(P) [€/h] = cost_slope [€/MWh] * P [MW] + cost_fixed [€/h] * on

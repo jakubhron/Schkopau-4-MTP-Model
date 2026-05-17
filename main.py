@@ -18,6 +18,9 @@ from __future__ import annotations
 import os
 import sys
 
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 import mosek
 from pyomo.environ import Var, value
 
@@ -186,7 +189,7 @@ def _fix_tiers_from_hint(m, m_hint, *, window: int = 24) -> None:
     n_transitions = sum(len(v) for v in transition_hours.values())
     n_startups_total = sum(len(v) for v in startup_hours.values())
     print(f"    _fix_tiers_from_hint: {n_transitions} transition points, "
-          f"{n_startups_total} startups, window=±{window}h")
+          f"{n_startups_total} startups, window=+/-{window}h")
     print(f"      Fixed on[b,t] at {n_fixed_on} / {2 * T_len} slots "
           f"({2 * T_len - n_fixed_on} remain free)")
     print(f"      Fixed startup=0 at {n_fixed_startup} slots")
@@ -219,6 +222,288 @@ def _duo_coal_sum(m) -> float:
             bo = float(bo) if bo is not None else 0.0
             total += adj * bo
     return total
+
+
+def _run_coal_sensitivity(df, cost_meta, m_baseline,
+                          lp_dual_shadows: dict | None = None) -> dict:
+    """Run LP sensitivity with perturbed coal limits (integers fixed from baseline).
+
+    Fixes all integer/binary variables at the baseline MIP solution,
+    perturbs coal_limit_t by +delta tonnes per month, and re-solves as LP.
+    Compares per-month PnL against the baseline to derive the marginal
+    value of coal (EUR / t).
+
+    This avoids MIP noise entirely — only the continuous dispatch shifts.
+
+    Parameters
+    ----------
+    lp_dual_shadows : dict, optional
+        {(year, month): EUR/t} LP dual shadow prices.  Used to warn when
+        a sensitivity delta returns zero but the LP dual is positive
+        (meaning the delta is too large for continuous dispatch to absorb).
+
+    Returns
+    -------
+    dict
+        ``{delta_kt: {(year, month): pnl_per_tonne}}``
+    """
+    from pyomo.core import Var
+    from pyomo.environ import Binary, NonNegativeReals, SolverFactory
+
+    if not cfg.USE_COAL_CONSTRAINS or not cfg.COAL_SENSITIVITY_DELTAS:
+        return {}
+
+    if not hasattr(m_baseline, "coal_monthly_limit"):
+        return {}
+
+    coal_limits_orig = cost_meta.get("coal_limits", {})
+    if not coal_limits_orig:
+        return {}
+
+    # Save original coal limit param values
+    orig_limit_t = {ym: float(value(m_baseline.coal_limit_t[ym]))
+                    for ym in m_baseline.coal_months}
+
+    # Fix all integer/binary variables and relax domains → pure LP
+    print("--- Coal sensitivity: fixing integers from baseline for LP re-solves ...")
+    fixed_vars: list = []
+    for v in m_baseline.component_objects(Var, active=True):
+        for idx in v:
+            vd = v[idx]
+            if vd.is_integer() or vd.is_binary():
+                orig_domain = vd.domain
+                if not vd.fixed:
+                    vd.fix(round(value(vd)))
+                    fixed_vars.append((v, idx, orig_domain, True))
+                else:
+                    fixed_vars.append((v, idx, orig_domain, False))
+                vd.domain = NonNegativeReals
+
+    # ── Forward extension: unfix `on` at hours right after each shutdown ──
+    # This allows the LP to prolong running blocks when extra coal is available.
+    # startup stays fixed at 0 (correct: extending ≠ new start).
+    extend_K = getattr(cfg, 'COAL_SENSITIVITY_EXTEND_HOURS', 0)
+    unfixed_on_count = 0
+    if extend_K > 0:
+        T_set = set(m_baseline.T)
+        for b in m_baseline.B:
+            T_list = sorted(m_baseline.T)
+            for i in range(len(T_list) - 1):
+                t_cur = T_list[i]
+                t_nxt = T_list[i + 1]
+                on_cur = round(value(m_baseline.on[b, t_cur]))
+                on_nxt = round(value(m_baseline.on[b, t_nxt]))
+                if on_cur == 1 and on_nxt == 0:
+                    # Shutdown boundary → allow forward extension
+                    for k in range(1, extend_K + 1):
+                        t_ext = t_cur + k
+                        if t_ext not in T_set:
+                            break
+                        if round(value(m_baseline.on[b, t_ext])) == 1:
+                            break  # hit another ON block
+                        m_baseline.on[b, t_ext].unfix()
+                        m_baseline.on[b, t_ext].domain = Binary
+                        m_baseline.on[b, t_ext].setlb(0)
+                        m_baseline.on[b, t_ext].setub(1)
+                        unfixed_on_count += 1
+        print(f"--- Block extension enabled: {unfixed_on_count} on-variables "
+              f"unfixed (up to {extend_K}h past each shutdown)")
+
+    lp_solver = SolverFactory("mosek")
+    sensitivity: dict = {}
+
+    # ── Re-solve baseline MIP with unfixed on-vars at delta=0 ──
+    # This ensures the baseline accounts for the same degrees of freedom
+    # (unfixed extension on-vars) as the perturbed solves, so the
+    # sensitivity measures only the value of extra coal, not re-dispatch gains.
+    if unfixed_on_count > 0:
+        lp_solver.options["MSK_IPAR_MIO_CONSTRUCT_SOL"] = "MSK_ON"
+        lp_solver.options["MSK_DPAR_MIO_TOL_REL_GAP"] = "0.0001"
+        lp_solver.options["MSK_DPAR_MIO_MAX_TIME"] = "300"
+        print("--- Re-solving baseline MIP with extension on-vars unfixed (delta=0) ...")
+        lp_solver.solve(m_baseline, tee=False)
+
+        # Fix extension on-vars at delta=0 solution → pure LP for all deltas.
+        # This eliminates MIP noise (non-monotonic shadow prices) while keeping
+        # the delta=0 re-dispatch (extensions turned on/off optimally at current
+        # coal limits).
+        ext_newly_on = 0
+        for b in m_baseline.B:
+            for t in m_baseline.T:
+                vd = m_baseline.on[b, t]
+                if not vd.fixed:
+                    val = round(value(vd))
+                    if val == 1:
+                        ext_newly_on += 1
+                    vd.fix(val)
+                    vd.domain = NonNegativeReals
+        print(f"    Baseline re-solved ({ext_newly_on} extension hours turned on)")
+        print(f"    Extension on-vars fixed at delta=0 -> pure LP for sensitivity")
+
+        # ── Correct startup/tier variables to match the updated on-pattern ──
+        # Extensions may have (a) bridged an entire OFF gap so the subsequent
+        # startup is now spurious (block never went offline), or (b) shortened
+        # a gap across a tier boundary so a cheaper tier now applies.
+        #
+        # in_ramp is continuous and linked to startup via in_ramp_lb/ub
+        # constraints → it self-corrects during the LP re-solve once startup
+        # is fixed to the right value.
+        # shutdown is continuous and self-corrects via the su_sd_balance
+        # constraint: startup - shutdown = on[t] - on[t-1].
+        # Only startup (Binary) and hot/cold/vcold_start (Binary) need
+        # explicit correction here.
+        T_sorted = sorted(m_baseline.T)
+        corrections_log: list[str] = []
+        for b in m_baseline.B:
+            # off_count = consecutive OFF hours up to and including the
+            # current hour.  Use 200 as a sentinel when the pre-horizon
+            # state is unknown (same convention as warm_start_heuristic).
+            off_count = 0 if cfg.INITIAL_ON.get(b, 0) else 200
+            for i, t in enumerate(T_sorted):
+                on_prev = (cfg.INITIAL_ON.get(b, 0)
+                           if i == 0
+                           else round(value(m_baseline.on[b, T_sorted[i - 1]])))
+                on_cur = round(value(m_baseline.on[b, t]))
+                true_startup = (on_cur == 1 and on_prev == 0)
+
+                if on_cur == 0:
+                    off_count += 1
+                else:
+                    off_at_start = off_count
+                    off_count = 0
+
+                su_val = round(value(m_baseline.startup[b, t]))
+
+                if su_val == 1 and not true_startup:
+                    # Extension bridged the gap: block never went offline.
+                    # Clear the spurious startup and all tier flags.
+                    # Effect: startup_requires_pmin Big-M deactivates (P freed),
+                    # in_ramp_ub forces in_ramp → 0 (ramp envelope deactivates),
+                    # shutdown self-corrects to 0 via su_sd_balance.
+                    m_baseline.startup[b, t].fix(0)
+                    m_baseline.hot_start[b, t].fix(0)
+                    m_baseline.cold_start[b, t].fix(0)
+                    m_baseline.vcold_start[b, t].fix(0)
+                    corrections_log.append(
+                        f"      {b} t={t}: startup cleared (gap bridged by extension)")
+
+                elif true_startup:
+                    # Real startup — check whether the extension shortened the
+                    # gap enough to cross a tier boundary.
+                    cor_hot   = 1 if off_at_start < 10 else 0
+                    cor_cold  = 1 if 60 <= off_at_start < 100 else 0
+                    cor_vcold = 1 if off_at_start >= 100 else 0
+
+                    old_hot   = round(value(m_baseline.hot_start[b, t]))
+                    old_cold  = round(value(m_baseline.cold_start[b, t]))
+                    old_vcold = round(value(m_baseline.vcold_start[b, t]))
+
+                    if (cor_hot != old_hot or cor_cold != old_cold
+                            or cor_vcold != old_vcold):
+                        m_baseline.hot_start[b, t].fix(cor_hot)
+                        m_baseline.cold_start[b, t].fix(cor_cold)
+                        m_baseline.vcold_start[b, t].fix(cor_vcold)
+
+                        def _tier(h, c, v):
+                            return 'hot' if h else ('cold' if c else ('vcold' if v else 'warm'))
+
+                        corrections_log.append(
+                            f"      {b} t={t}: tier "
+                            f"{_tier(old_hot, old_cold, old_vcold)}"
+                            f"→{_tier(cor_hot, cor_cold, cor_vcold)}"
+                            f" (off={off_at_start}h)")
+
+        if corrections_log:
+            print(f"    Startup/tier corrections applied ({len(corrections_log)}):")
+            for msg in corrections_log:
+                print(msg)
+        else:
+            print("    No startup/tier corrections needed.")
+
+        # Re-solve as pure LP to get clean baseline (MIP continuous solution
+        # may differ from LP optimum due to B&B tolerances).
+        # Attach dual Suffix so we get LP duals from this same solve.
+        from pyomo.environ import Suffix
+        if not hasattr(m_baseline, 'dual'):
+            m_baseline.dual = Suffix(direction=Suffix.IMPORT)
+        lp_solver.solve(m_baseline, tee=False)
+        print("    LP baseline re-solved after fixing extensions")
+
+        print("\n    Sensitivity baseline LP duals (reference for finite-difference):")
+        for ym in sorted(coal_limits_orig):
+            if ym not in m_baseline.coal_months:
+                continue
+            dual_val = m_baseline.dual.get(m_baseline.coal_monthly_limit[ym], 0.0)
+            print(f"      {ym[0]}-{ym[1]:02d}: {dual_val:+.2f} EUR/t")
+    if hasattr(m_baseline, 'dual'):
+        m_baseline.del_component(m_baseline.dual)
+
+    # Capture baseline P values for diagnostic comparison
+    base_P = {}
+    for b in m_baseline.B:
+        for t in m_baseline.T:
+            base_P[b, t] = float(value(m_baseline.P[b, t]))
+
+    # Baseline objective for clean shadow price computation
+    base_obj = float(value(m_baseline.obj))
+
+    for delta_kt in cfg.COAL_SENSITIVITY_DELTAS:
+        delta_t = delta_kt * 1000
+        print(f"\n--- Coal sensitivity: +{delta_t:.0f}t (+{delta_kt} kt) per month ---")
+
+        pnl_per_t: dict = {}
+
+        for ym in sorted(coal_limits_orig):
+            if ym not in m_baseline.coal_months:
+                continue
+            # Perturb ONLY this month's coal limit
+            m_baseline.coal_limit_t[ym] = orig_limit_t[ym] + delta_t
+
+            # Solve LP (integers fixed, only continuous vars)
+            lp_solver.solve(m_baseline, tee=False)
+
+            # Shadow price = total objective improvement / delta
+            sens_obj = float(value(m_baseline.obj))
+            dpnl = sens_obj - base_obj
+            pnl_per_t[ym] = dpnl / delta_t if delta_t > 0 else 0.0
+
+            # Count dispatch changes in the perturbed month
+            month_hours = m_baseline._month_hours[ym]
+            n_changed = 0
+            total_dp = 0.0
+            changed_details: list[tuple] = []
+            for b in m_baseline.B:
+                for t in month_hours:
+                    dp = float(value(m_baseline.P[b, t])) - base_P[b, t]
+                    if abs(dp) > 0.01:
+                        n_changed += 1
+                        total_dp += dp
+                        changed_details.append((b, t, base_P[b, t], float(value(m_baseline.P[b, t])), dp))
+
+            print(f"    {ym[0]}-{ym[1]:02d}: {pnl_per_t[ym]:+.2f} EUR/t  "
+                  f"(dPnL={dpnl:+,.0f} EUR, {n_changed} hrs, "
+                  f"net {total_dp:+.1f} MWh)")
+            if changed_details:
+                for b, t, p_base, p_new, dp in sorted(changed_details, key=lambda x: x[1]):
+                    dt = df.iloc[t]['Date']
+                    print(f"        {b} t={t}  {dt}  P: {p_base:.1f} -> {p_new:.1f}  (d{dp:+.1f} MW)")
+
+            # Restore this month's coal limit
+            m_baseline.coal_limit_t[ym] = orig_limit_t[ym]
+
+        sensitivity[delta_kt] = pnl_per_t
+
+    # Restore original coal limits
+    for ym in m_baseline.coal_months:
+        m_baseline.coal_limit_t[ym] = orig_limit_t[ym]
+
+    # Restore integer domains and unfix
+    for v, idx, orig_domain, was_unfixed in fixed_vars:
+        v[idx].domain = orig_domain
+        if was_unfixed:
+            v[idx].unfix()
+
+    return sensitivity
 
 
 def main() -> None:
@@ -324,11 +609,11 @@ def main() -> None:
                 _d_obj = abs(_cur_obj - _prev_obj)
                 _d_duo = abs(_cur_duo_cost - _prev_duo_cost)
                 _d_coal = abs(_cur_duo_coal - _prev_duo_coal)
-                print(f"    |Δ obj| = {_d_obj:,.0f} EUR  "
+                print(f"    |d obj| = {_d_obj:,.0f} EUR  "
                       f"(tol {cfg.RELIN_OBJ_TOL:,.0f})")
-                print(f"    |Δ DUO cost| = {_d_duo:,.0f} EUR  "
+                print(f"    |d DUO cost| = {_d_duo:,.0f} EUR  "
                       f"(tol {cfg.RELIN_DUO_COST_TOL:,.0f})")
-                print(f"    |Δ DUO coal| = {_d_coal:,.1f} t")
+                print(f"    |d DUO coal| = {_d_coal:,.1f} t")
                 if _d_obj < cfg.RELIN_OBJ_TOL and _d_duo < cfg.RELIN_DUO_COST_TOL:
                     print(f"    Converged after {_relin_iter + 1} pass(es).")
                     break
@@ -347,7 +632,82 @@ def main() -> None:
     # Coal shadow prices (LP re-solve with fixed binaries)
     coal_shadow_prices = {}
     merchant_shadow_prices = {}
-    if not skip_solve and m is not None and cfg.USE_COAL_CONSTRAINS:
+
+    # When loading from cache, rebuild model and inject cached solution
+    # so we can still compute shadow prices and sensitivity.
+    if skip_solve and m is None and cfg.USE_COAL_CONSTRAINS and cfg.COAL_SENSITIVITY_DELTAS:
+        print("--- Rebuilding model from cache for shadow prices / sensitivity ...")
+        _pnom_cache = {}
+        for b in cfg.BLOCKS:
+            p_col = f"P_eff_{b}"
+            if p_col in df.columns:
+                for i, t in enumerate(range(len(df))):
+                    _pnom_cache[(b, t)] = float(df.iloc[i][p_col])
+        m = build_model(df, cost_meta, pnom_hint=_pnom_cache if _pnom_cache else None)
+
+        # Inject cached on values and recompute ALL dependent binaries
+        # following the same logic as model_builder warm-start.
+        bA, bB = cfg.BLOCKS
+        T_list = list(m.T)
+
+        for b in cfg.BLOCKS:
+            on_col = f"on_model_{b}"
+            if on_col not in df.columns:
+                continue
+
+            off_count = 200  # assume cold start initially
+            for t in T_list:
+                on_val = int(round(df.iloc[t][on_col]))
+                if not m.on[b, t].fixed:
+                    m.on[b, t].value = on_val
+
+                # startup / shutdown from on-pattern
+                prev_on = int(round(df.iloc[t - 1][on_col])) if t > 0 else cfg.INITIAL_ON[b]
+                su = 1 if on_val == 1 and prev_on == 0 else 0
+                sd = 1 if on_val == 0 and prev_on == 1 else 0
+                if not m.startup[b, t].fixed:
+                    m.startup[b, t].value = su
+                if not m.shutdown[b, t].fixed:
+                    m.shutdown[b, t].value = sd
+
+                # Track off-count for tier classification
+                if on_val == 0:
+                    off_count += 1 if t > 0 else 200
+                else:
+                    off_count_at_start = off_count
+                    off_count = 0
+
+                # Tier binaries
+                if su == 1:
+                    m.hot_start[b, t].value = 1 if off_count_at_start < 10 else 0
+                    m.cold_start[b, t].value = 1 if 60 <= off_count_at_start < 100 else 0
+                    m.vcold_start[b, t].value = 1 if off_count_at_start >= 100 else 0
+                else:
+                    m.hot_start[b, t].value = 0
+                    m.cold_start[b, t].value = 0
+                    m.vcold_start[b, t].value = 0
+
+                # P / P_eff — clip to bounds to avoid float-precision warnings
+                p_col = f"P_{b}"
+                peff_col = f"P_eff_{b}"
+                if p_col in df.columns:
+                    p_val = float(df.iloc[t][p_col])
+                    p_ub = m.P[b, t].ub
+                    if p_ub is not None:
+                        p_val = min(p_val, p_ub)
+                    m.P[b, t].value = max(0.0, p_val)
+                if peff_col in df.columns:
+                    m.P_eff[b, t].value = float(df.iloc[t][peff_col])
+
+        # Set both_on / plant_off from on values
+        for t in T_list:
+            onA = int(round(value(m.on[bA, t])))
+            onB = int(round(value(m.on[bB, t])))
+            m.both_on[t].value = 1 if (onA == 1 and onB == 1) else 0
+            m.plant_off[t].value = 1 if (onA == 0 and onB == 0) else 0
+        print("--- Model rebuilt and solution injected from cache")
+
+    if m is not None and cfg.USE_COAL_CONSTRAINS and hasattr(m, "coal_monthly_limit"):
         coal_shadow_prices, merchant_shadow_prices = extract_coal_shadow_prices(m)
 
     # Objective value
@@ -378,17 +738,23 @@ def main() -> None:
     run_audit(df, m, skip_solve=skip_solve, cached_meta=cached_meta, cost_meta=cost_meta)
 
     # ----------------------------------------------------------------
-    #  Step 6 – Save cache
+    #  Step 5b – Save cache (before sensitivity so solution is safe)
     # ----------------------------------------------------------------
     if not skip_solve:
         save_cache(df, obj_val)
+
+    # Coal sensitivity (LP re-solves with perturbed limits)
+    coal_sensitivity = {}
+    if m is not None and cfg.USE_COAL_CONSTRAINS:
+        coal_sensitivity = _run_coal_sensitivity(df, cost_meta, m, coal_shadow_prices)
 
     # ----------------------------------------------------------------
     #  Step 7 – Write Excel report
     # ----------------------------------------------------------------
     write_excel(df, cost_meta, cfg.OUTPUT_FILE,
                 coal_shadow_prices=coal_shadow_prices,
-                merchant_shadow_prices=merchant_shadow_prices)
+                merchant_shadow_prices=merchant_shadow_prices,
+                coal_sensitivity=coal_sensitivity)
 
 
 if __name__ == "__main__":

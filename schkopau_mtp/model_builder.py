@@ -267,6 +267,7 @@ def build_model(df: pd.DataFrame, cost_meta: dict, *, pnom_hint: dict | None = N
             m.coal_limit_t = Param(
                 m.coal_months,
                 initialize={(y, mo): coal_limits[(y, mo)] * 1000.0 * _tol for y, mo in _active_months},
+                mutable=True,
             )
 
             _duo = _has_duo
