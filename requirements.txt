@@ -1,0 +1,9 @@
+numpy>=1.24
+pandas>=2.0
+pyarrow>=14.0
+pyomo>=6.6
+openpyxl>=3.1
+mosek>=10.0
+highspy>=1.13
+markdown>=3.6
+pymdown-extensions>=10.8
