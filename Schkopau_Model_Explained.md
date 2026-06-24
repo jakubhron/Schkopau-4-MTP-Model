@@ -20,7 +20,7 @@ The objective is to maximise total **profit** (revenue minus costs) subject to p
 
 ### 1.3  Why mathematical optimisation is required
 
-A naive heuristic — "run whenever the price is positive" — fails because of interlocking constraints.  Starting a block incurs a lump-sum cost and requires at least 8 consecutive hours of operation (minimum up-time).  Shutting down requires at least 6 consecutive hours offline (minimum down-time).  Monthly coal budgets further restrict how many hours the plant can run.  These interdependencies make the problem a **Mixed-Integer Linear Programme (MILP)**, solved by the commercial optimiser **MOSEK**.
+A naive heuristic — "run whenever the price is positive" — fails because of interlocking constraints.  Starting a block incurs a lump-sum cost and requires at least 8 consecutive hours of operation (minimum up-time).  Shutting down requires at least 8 consecutive hours offline (minimum down-time).  Monthly coal budgets further restrict how many hours the plant can run.  These interdependencies make the problem a **Mixed-Integer Linear Programme (MILP)**, solved by the commercial optimiser **MOSEK**.
 
 ### 1.4  High-level workflow
 
@@ -222,7 +222,7 @@ The Starts tab defines **five start-up tiers** for each block, with a **ramp pro
 > **Note**: A "—" means the block has already reached full capacity by that hour.
 > The very cold tier is the only one that needs all four ramp hours.
 
-**All four active tiers** — **hot**, **warm**, **cold**, and **very cold** — are fully implemented in both the optimiser constraints and objective.  The *very hot* tier (off < 5 h) is structurally impossible because the minimum-down-time constraint forces a block to stay off for at least 6 hours after shutdown, so it never appears in practice.
+**All four active tiers** — **hot**, **warm**, **cold**, and **very cold** — are fully implemented in both the optimiser constraints and objective.  The *very hot* tier (off < 5 h) is structurally impossible because the minimum-down-time constraint forces a block to stay off for at least 8 hours after shutdown, so it never appears in practice.
 
 ### 2.3  Coal_constrains tab (monthly coal limits)
 
@@ -606,9 +606,9 @@ The components are:
    | **Cold** (60–100 h off) | Equipment cooled significantly | $\Delta_{\text{cold}} = \text{cold\_cost} - \text{warm\_cost}$ (positive — adds cost above warm baseline) |
    | **Very cold** (≥100 h off) | Full cold start; most expensive | $\Delta_{\text{vcold}} = \text{vcold\_cost} - \text{warm\_cost}$ (positive — largest surcharge) |
 
-   Note: the **very hot** tier (off < 5 hours) cannot occur because the minimum down-time is 6 hours — the block physically cannot restart that quickly.
+    Note: the **very hot** tier (off < 5 hours) cannot occur because the minimum down-time is 8 hours — the block physically cannot restart that quickly.
 
-   **`START_MARGIN_MIN`** is an optional additional hurdle (in EUR) added on top of every startup cost regardless of tier.  It is defined in the config file and currently set to **22 000 EUR**.  It makes the model require that each startup generates at least that much extra profit to justify turning on — acting as a safety margin against marginal startups that barely break even.  Because it is multiplied by `startup` (not by a tier variable), it applies equally to all startup types.
+    **`START_MARGIN_MIN`** is an optional additional hurdle (in EUR) added on top of every startup cost regardless of tier.  It is defined in the config file and currently set to **0 EUR**.  It makes the model require that each startup generates at least that much extra profit to justify turning on — acting as a safety margin against marginal startups that barely break even.  Because it is multiplied by `startup` (not by a tier variable), it applies equally to all startup types.
 
 4. **OFF costs** — when the entire plant is offline, the model charges two components:
    - **House power**: the plant's own auxiliary consumption (10 MW) is charged at $(\text{Price} + \text{Grid fee})$ per MWh in both DOW modes.
@@ -653,11 +653,11 @@ $$\sum_{k=0}^{7} \text{on}_{b,t+k} \;\ge\; 8 \times \text{startup}_{b,t}$$
 
 Once started, a block must remain online for **at least 8 consecutive hours**, reflecting the thermal-stress limits of boiler components.
 
-### 4.4  Minimum down-time (6 hours)
+### 4.4  Minimum down-time (8 hours)
 
-$$\sum_{k=0}^{5} (1 - \text{on}_{b,t+k}) \;\ge\; 6 \times (\text{on}_{b,t-1} - \text{on}_{b,t})$$
+$$\sum_{k=0}^{7} (1 - \text{on}_{b,t+k}) \;\ge\; 8 \times (\text{on}_{b,t-1} - \text{on}_{b,t})$$
 
-After shutdown, a block must remain offline for **at least 6 consecutive hours** to allow safe turbine cooling.
+After shutdown, a block must remain offline for **at least 8 consecutive hours** to allow safe turbine cooling.
 
 ### 4.5  Power bounds
 
@@ -742,7 +742,7 @@ The start-up tier is determined by how long the block has been offline.  Four ti
 
 Binary variables `hot_start`, `cold_start`, and `vcold_start` are linked to `startup` with mutual-exclusivity constraints so that if a start occurs, exactly one tier applies (or none, which means warm).
 
-The *very hot* tier (off < 5 h) is structurally impossible because `MIN_DOWN = 6 h`; it has no binary variable.
+The *very hot* tier (off < 5 h) is structurally impossible because `MIN_DOWN = 8 h`; it has no binary variable.
 
 ### 4.8  Both-on and plant-off linearisation
 
@@ -903,7 +903,7 @@ This intentionally over-dispatches (running unprofitable hours), but MOSEK corre
 
 **Step 3 — Respect the initial state.**
 
-The first hour (t=0) is special.  The config file specifies which blocks start ON or OFF at the beginning of the planning horizon.  For example, `INITIAL_ON = {"A": 0, "B": 1}` means Block A starts OFF and Block B starts ON.  The code overwrites hour 0 accordingly:
+The first hour (t=0) is special.  The config file specifies which blocks start ON or OFF at the beginning of the planning horizon.  For example, `INITIAL_ON = {"A": 1, "B": 0}` means Block A starts ON and Block B starts OFF.  The code overwrites hour 0 accordingly:
 
 ```python
 on_b[0] = INITIAL_ON[b]   # e.g. 0 for Block A, 1 for Block B
@@ -911,7 +911,7 @@ on_b[0] = INITIAL_ON[b]   # e.g. 0 for Block A, 1 for Block B
 
 **Step 4 — Enforce minimum down-time (3 passes).**
 
-Whenever the code sees a transition from ON to OFF (i.e. `on_b[i-1] == 1` and `on_b[i] == 0`), it forces the **next 6 hours** to also be OFF.  This reflects the physical requirement: once a block shuts down, it needs at least 6 hours for the turbine to cool before it can restart.
+Whenever the code sees a transition from ON to OFF (i.e. `on_b[i-1] == 1` and `on_b[i] == 0`), it forces the **next 8 hours** to also be OFF.  This reflects the physical requirement: once a block shuts down, it needs at least 8 hours for the turbine to cool before it can restart.
 
 **What if an outage is already longer than 6 hours?**  This rule only looks at the moment when the block goes from ON to OFF — the *transition point*.  If a planned outage already lasts, say, 20 hours, the minimum down-time is already satisfied and the code does nothing extra.  For example:
 
@@ -923,7 +923,7 @@ State:  ... ON  ON | OFF OFF OFF ... OFF| ON  ON ...
                    (outage start)        (outage end)
 ```
 
-The rule checks hour 50 (the first OFF after ON) and asks: "are the next 6 hours also OFF?"  Since the outage runs all the way to hour 69 (20 hours), the answer is yes — no changes needed.  The minimum down-time rule only forces additional OFF hours when a short gap (fewer than 6 hours) appears between two ON periods.
+The rule checks hour 50 (the first OFF after ON) and asks: "are the next 8 hours also OFF?"  Since the outage runs all the way to hour 69 (20 hours), the answer is yes — no changes needed.  The minimum down-time rule only forces additional OFF hours when a short gap (fewer than 8 hours) appears between two ON periods.
 
 The code runs this check 3 times (3 "passes"), because forcing hours OFF can create new transitions that need their own 6-hour cooldown.  Here is a detailed example showing why multiple passes are necessary:
 
@@ -937,8 +937,8 @@ State:  ON  ON  ON  OFF OFF ON  ON  ON  OFF OFF OFF ON  ON  ON  ON
 ```
 
 **Pass 1** — The code scans left to right, looking for ON→OFF transitions:
-- Hour 47: transition ON→OFF detected.  Are the next 6 hours (47–52) all OFF?  No — hours 49–51 are ON.  → Force hours 47–52 to OFF.
-- Hour 53: transition ON→OFF detected.  Are the next 6 hours (53–58) all OFF?  No — hours 55–58 are ON.  → Force hours 53–58 to OFF.
+- Hour 47: transition ON→OFF detected.  Are the next 8 hours (47–54) all OFF?  No — hours 49–51 are ON.  → Force hours 47–54 to OFF.
+- Hour 53: transition ON→OFF detected.  Are the next 8 hours (53–60) all OFF?  No — hours 55–58 are ON.  → Force hours 53–60 to OFF.
 
 ```
 Hour:   44  45  46  47  48  49  50  51  52  53  54  55  56  57  58
@@ -1102,14 +1102,14 @@ Heuristic coal cut 2026-04: turned off 474 slots (coal@Pmin 207671t > eff.limit 
 
 2. **Run up to 10 cleanup passes per block.** Each pass does two things:
 
-   **a) Enforce minimum down-time:** Scan left to right.  Wherever the schedule goes from ON to OFF, force the next 6 hours OFF:
+    **a) Enforce minimum down-time:** Scan left to right.  Wherever the schedule goes from ON to OFF, force the next 8 hours OFF:
 
 <pre class="annotated">
 i = 0
 while i < number_of_hours:                              <span class="c1"># scan left to right</span>
     if on_hint[b][i] == 0 and i > 0 and on_hint[b][i-1] == 1:
                                                          <span class="c2"># ON→OFF transition detected</span>
-        for k in range(6):                               <span class="c3"># force 6 hours of cooldown</span>
+        for k in range(cfg.MIN_DOWN):                    <span class="c3"># force 8 hours of cooldown (MIN_DOWN)</span>
             if i + k < number_of_hours and not fixed[b, i+k]:
                 on_hint[b][i + k] = 0                    <span class="c4"># set this hour to OFF</span>
         i += 6                                           <span class="c5"># jump past the forced-off block</span>
@@ -2281,9 +2281,9 @@ Tier boundary corrections and their savings:
 | 70 h (cold) | 55 h (warm) | 39 910 EUR | **38 291 EUR** | **−1 619 EUR** |
 | 110 h (vcold) | 90 h (cold) | 60 251 EUR | **39 910 EUR** | **−20 341 EUR** |
 
-**Minimum down-time (6 hours) and extensions:**
+**Minimum down-time (8 hours) and extensions:**
 
-The extension does not enforce the 6-hour minimum down-time constraint.  If a 4-hour gap exists between two ON periods, the extension can technically fill it.  In reality this would violate the minimum-down-time constraint, but since the sensitivity is used for business analysis (not actual scheduling), this is an acceptable simplification.  The main schedule (from the MILP) always obeys minimum down-time.
+The extension does not enforce the 8-hour minimum down-time constraint.  If a 4-hour gap exists between two ON periods, the extension can technically fill it.  In reality this would violate the minimum-down-time constraint, but since the sensitivity is used for business analysis (not actual scheduling), this is an acceptable simplification.  The main schedule (from the MILP) always obeys minimum down-time.
 
 #### Configuration
 
@@ -2606,14 +2606,14 @@ All parameters are defined in `schkopau_mtp/config.py`.  Changing a parameter on
 | Parameter | Default | What it controls |
 |-----------|---------|-----------------|
 | `USE_COAL_CONSTRAINS` | True | Enable/disable monthly coal caps.  Set False for unlimited coal (unrestricted) runs. |
-| `COAL_TOLERANCE` | 0.005 | Allow coal limit to be exceeded by this fraction (e.g. 0.005 = 0.5%). |
+| `COAL_TOLERANCE` | 0.01 | Allow coal limit to be exceeded by this fraction (e.g. 0.01 = 1%). |
 | `USE_DOW_OPPORTUNITY_COSTS` | False | Include DOW steam in P_eff and DOW revenues/OFF costs (True) vs. treat as pure merchant (False). |
-| `MOSEK_MIO_TOL_REL_GAP` | 0.02 (2%) | Stop when the gap between best solution and theoretical best is ≤ this fraction. Lower = more precise but slower. |
-| `MOSEK_MIO_MAX_TIME` | 2500 s | Maximum time for the solver.  The solver stops after this even if the gap is above the tolerance. |
+| `MOSEK_MIO_TOL_REL_GAP` | 0.035 (3.5%) | Stop when the gap between best solution and theoretical best is ≤ this fraction. Lower = more precise but slower. |
+| `MOSEK_MIO_MAX_TIME` | 1000 s | Maximum time for the solver.  The solver stops after this even if the gap is above the tolerance. |
 | `CONSTRUCT_SOL` | ON | MOSEK constructs an LP solution from the integer hints before branching.  Almost always should be ON. |
 | `MIN_UP` | 8 h | Minimum consecutive hours a block must stay on after starting. |
-| `MIN_DOWN` | 6 h | Minimum consecutive hours a block must stay off after stopping. |
-| `INITIAL_ON` | {"A": 0, "B": 1} | Which blocks are on (1) or off (0) at the start of the planning horizon. |
+| `MIN_DOWN` | 8 h | Minimum consecutive hours a block must stay off after stopping. |
+| `INITIAL_ON` | {"A": 1, "B": 0} | Which blocks are on (1) or off (0) at the start of the planning horizon. |
 | `OWN_CONSUMPTION` | 10 MW | Auxiliary power the plant draws from the grid when offline. |
 | `DOW_OFF_CONSUMPTION` | 130 MW | The DOW consumer's electric backup load when the plant is fully offline. |
 | `DOW_OPPORTUNITY_REVENUE` | 188 EUR/MW | Revenue rate for DOW steam delivery. |
@@ -2621,9 +2621,9 @@ All parameters are defined in `schkopau_mtp/config.py`.  Changing a parameter on
 | `DUAL_BLOCK_BOOST` | 5 MW | Extra capacity each block gets when both run simultaneously. |
 | `START_MARGIN_MIN` | 0 EUR | Flat amount added to every start-up cost (safety margin for wear-and-tear uncertainty). |
 | `SOLVE_MODE` | `"staged_ramp"` | Controls startup-ramp fidelity and warm-start staging: `"simple"`, `"full"`, or `"staged_ramp"` (recommended).  See **Section 4.9** for details. |
-| `RELINEARIZE_MAX_ITERS` | 0 | Maximum iterative DUO re-linearisation passes after Stage 2.  The loop stops early when objective and DUO cost changes fall below `RELIN_OBJ_TOL` / `RELIN_DUO_COST_TOL`. |
-| `RELIN_OBJ_TOL` | 5 000 EUR | Convergence threshold: stop re-linearisation when objective change is below this. |
-| `RELIN_DUO_COST_TOL` | 2 000 EUR | Convergence threshold: stop re-linearisation when DUO cost sum change is below this. |
+| `RELINEARIZE_MAX_ITERS` | 3 | Maximum iterative DUO re-linearisation passes after Stage 2.  The loop stops early when objective and DUO cost changes fall below `RELIN_OBJ_TOL` / `RELIN_DUO_COST_TOL`. |
+| `RELIN_OBJ_TOL` | 50 000 EUR | Convergence threshold: stop re-linearisation when objective change is below this. |
+| `RELIN_DUO_COST_TOL` | 20 000 EUR | Convergence threshold: stop re-linearisation when DUO cost sum change is below this. |
 | `OFFLINE_FIXED_PENALTY_NO_DOW` | 3 420 EUR/h | Fixed hourly penalty charged when the plant is offline in DOW-OFF mode (replaces the DOW-related OFF costs). |
 | `DEFAULT_GRIDFEE` | 23.6 EUR/MWh | Grid fee used when the input file does not specify one. |
 | `COAL_SENSITIVITY_DELTAS` | `[1, 5]` | List of perturbation sizes in kilo-tonnes for the coal sensitivity curve (see Section 7.8). The first value (+1 000 t) confirms the LP dual; the second (+5 000 t) shows how the price decays when existing ON-hours saturate. |
