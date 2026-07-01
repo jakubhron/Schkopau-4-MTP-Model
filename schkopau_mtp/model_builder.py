@@ -781,44 +781,48 @@ def warm_start_heuristic(m) -> None:
                   f"(limit {limit:.0f}t, scale-back {scale_back:.1%})")
 
     # --- Comprehensive warm-start constraint violation check ---
-    from pyomo.environ import Constraint as _Con
-    viol_counts: dict = {}
-    viol_examples: dict = {}
-    for con_obj in m.component_objects(_Con, active=True):
-        name = con_obj.name
-        n_viol = 0
-        worst_viol = 0.0
-        worst_idx = None
-        for idx in con_obj:
-            c = con_obj[idx]
-            try:
-                body = value(c.body)
-            except Exception:
-                continue
-            lb = value(c.lower) if c.lower is not None else None
-            ub = value(c.upper) if c.upper is not None else None
-            viol = 0.0
-            if lb is not None and body < lb - 1e-6:
-                viol = lb - body
-            if ub is not None and body > ub + 1e-6:
-                viol = max(viol, body - ub)
-            if viol > 0:
-                n_viol += 1
-                if viol > worst_viol:
-                    worst_viol = viol
-                    worst_idx = idx
-        if n_viol > 0:
-            viol_counts[name] = n_viol
-            viol_examples[name] = (worst_idx, worst_viol)
+    # Disabled by default (cfg.WARM_START_VIOLATION_CHECK = False): iterating
+    # over ~30k Pyomo constraint bodies costs 30-60s per warm-start call.
+    # Enable only when debugging warm-start feasibility issues.
+    if cfg.WARM_START_VIOLATION_CHECK:
+        from pyomo.environ import Constraint as _Con
+        viol_counts: dict = {}
+        viol_examples: dict = {}
+        for con_obj in m.component_objects(_Con, active=True):
+            name = con_obj.name
+            n_viol = 0
+            worst_viol = 0.0
+            worst_idx = None
+            for idx in con_obj:
+                c = con_obj[idx]
+                try:
+                    body = value(c.body)
+                except Exception:
+                    continue
+                lb = value(c.lower) if c.lower is not None else None
+                ub = value(c.upper) if c.upper is not None else None
+                viol = 0.0
+                if lb is not None and body < lb - 1e-6:
+                    viol = lb - body
+                if ub is not None and body > ub + 1e-6:
+                    viol = max(viol, body - ub)
+                if viol > 0:
+                    n_viol += 1
+                    if viol > worst_viol:
+                        worst_viol = viol
+                        worst_idx = idx
+            if n_viol > 0:
+                viol_counts[name] = n_viol
+                viol_examples[name] = (worst_idx, worst_viol)
 
-    if viol_counts:
-        print(f"    DIAG: {len(viol_counts)} constraint blocks violated:")
-        for name in sorted(viol_counts, key=lambda n: -viol_counts[n]):
-            n = viol_counts[name]
-            idx, wv = viol_examples[name]
-            print(f"      {name}: {n} violations (worst={wv:.4f} at {idx})")
-    else:
-        print(f"    DIAG: ALL constraints satisfied")
+        if viol_counts:
+            print(f"    DIAG: {len(viol_counts)} constraint blocks violated:")
+            for name in sorted(viol_counts, key=lambda n: -viol_counts[n]):
+                n = viol_counts[name]
+                idx, wv = viol_examples[name]
+                print(f"      {name}: {n} violations (worst={wv:.4f} at {idx})")
+        else:
+            print(f"    DIAG: ALL constraints satisfied")
 
     print("--- Warm-start heuristic applied")
 

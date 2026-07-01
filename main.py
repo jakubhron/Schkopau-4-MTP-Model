@@ -552,7 +552,7 @@ def main() -> None:
             _orig_gap = cfg.MOSEK_MIO_TOL_REL_GAP
             _orig_time = cfg.MOSEK_MIO_MAX_TIME
             cfg.MOSEK_MIO_TOL_REL_GAP = "0.12"
-            cfg.MOSEK_MIO_MAX_TIME = "600"
+            cfg.MOSEK_MIO_MAX_TIME = "300"
             solver1 = create_solver()
             cfg.MOSEK_MIO_TOL_REL_GAP = _orig_gap
             cfg.MOSEK_MIO_MAX_TIME = _orig_time
@@ -588,7 +588,11 @@ def main() -> None:
             _prev_obj = float(value(m.obj))
             _prev_duo_cost = _duo_cost_sum(m)
             _prev_duo_coal = _duo_coal_sum(m)
-            for _relin_iter in range(cfg.RELINEARIZE_MAX_ITERS):
+            _relin_iters = cfg.RELINEARIZE_MAX_ITERS
+            if not cost_meta.get("has_duo", False):
+                print("--- DUO not active: skipping re-linearization passes")
+                _relin_iters = 0
+            for _relin_iter in range(_relin_iters):
                 print(f"\n--- Re-linearization pass {_relin_iter + 1}/{cfg.RELINEARIZE_MAX_ITERS}")
                 _pnom = {(b, t): float(value(m.P_eff[b, t]))
                          for b in m.B for t in m.T}
@@ -598,7 +602,10 @@ def main() -> None:
                 _copy_integer_hint(m_prev, m)
                 _resync_in_ramp(m)
                 _fix_tiers_from_hint(m, _m_fix_ref, window=24)
+                _orig_relin_time = cfg.MOSEK_MIO_MAX_TIME
+                cfg.MOSEK_MIO_MAX_TIME = cfg.RELIN_MIO_MAX_TIME
                 solver = create_solver()
+                cfg.MOSEK_MIO_MAX_TIME = _orig_relin_time
                 results = solve_model(solver, m, tee=True)
                 del m_prev
 

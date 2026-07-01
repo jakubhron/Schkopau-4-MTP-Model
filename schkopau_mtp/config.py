@@ -55,8 +55,8 @@ _input_stem = os.path.splitext(os.path.basename(INPUT_FILE))[0]
 # ============================================================
 USE_COAL_CONSTRAINS = True  # enforce monthly coal volume limits from input tab
 COAL_TOLERANCE = 0.01        # allow coal limit to be exceeded by this fraction (e.g. 0.02 = 2%)
-COAL_SENSITIVITY_DELTAS = [1,5]  # kt deltas for sensitivity solves (+1kt, +3kt, +5kt, +10kt)
-COAL_SENSITIVITY_EXTEND_HOURS = 48  # allow prolonging ON blocks by up to N hours past each shutdown
+COAL_SENSITIVITY_DELTAS = [5,10]  # kt deltas for sensitivity solves (+1kt, +3kt, +5kt, +10kt)
+COAL_SENSITIVITY_EXTEND_HOURS = 35  # allow prolonging ON blocks by up to N hours past each shutdown
 
 _restricted_tag = "restricted_" if USE_COAL_CONSTRAINS else ""
 OUTPUT_FILE = os.path.join(os.path.dirname(INPUT_FILE), f"{_input_stem}_results_{_restricted_tag}{_now}.xlsx")
@@ -79,7 +79,7 @@ SKIP_SOLVE_AND_EXTRACT = False
 #                   SOLVER SETTINGS
 # ============================================================
 USE_MOSEK = True
-MOSEK_MIO_TOL_REL_GAP = "0.035"    # 3.5 % MIP gap
+MOSEK_MIO_TOL_REL_GAP = "0.05"    # 5 % MIP gap
 MOSEK_MIO_MAX_TIME = "1000"          # max ~17 minutes
 
 # ============================================================
@@ -111,7 +111,13 @@ SOLVE_MODE = "staged_ramp"
 # 0 = no iteration (single Stage 2 solve with Stage 1 hint).
 # Each pass re-linearises DUO at the previous Stage 2 P_eff values.
 # The loop stops early when convergence criteria are met.
-RELINEARIZE_MAX_ITERS = 3
+# Keep at 1 for speed; increase to 2-3 only when DUO cost accuracy is critical.
+RELINEARIZE_MAX_ITERS = 2
+
+# Max solve time for re-linearization passes [seconds].
+# These passes have a fixed on/off skeleton from Stage 1, so they converge
+# faster than the initial Stage 2 solve — a shorter budget avoids wasted time.
+RELIN_MIO_MAX_TIME = "400"
 
 # Convergence tolerances for the re-linearization stopping rule.
 # The loop terminates when ALL of:
@@ -122,6 +128,11 @@ RELIN_DUO_COST_TOL = 20_000.0   # EUR – stop if DUO-adjusted cost sum changes 
 
 # Internal flag toggled by main.py during staged solves.  Do not set directly.
 USE_SIMPLE_STARTUP_RAMP = SOLVE_MODE == "simple"
+
+# When False (default), skip the Pyomo constraint-body evaluation loop at the
+# end of warm_start_heuristic.  Set to True only when debugging warm-start
+# feasibility — the check iterates ~30k constraints and adds 30-60s per call.
+WARM_START_VIOLATION_CHECK = False
 
 # ============================================================
 #                   ECONOMIC PARAMETERS
